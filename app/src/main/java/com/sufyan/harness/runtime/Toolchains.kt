@@ -31,7 +31,12 @@ class Toolchains(private val linux: LinuxRuntime) {
             Tool("curl", "curl", "curl --version", "HTTP client."),
             Tool("openssl", "OpenSSL", "openssl version", "TLS and crypto utilities."),
             Tool("python", "Python", "python3 --version", "Optional Python interpreter."),
+            Tool("java", "Java", "java -version", "Java runtime for Gradle and Android JVM builds."),
+            Tool("gradle", "Gradle", "gradle --version", "Build tool for Android and JVM projects."),
         )
+
+        /** Human label for a [Tool] id, falling back to the id itself so unknown ids stay visible. */
+        fun labelFor(toolId: String): String = CORE.firstOrNull { it.id == toolId }?.label ?: toolId
     }
 
     suspend fun detect(tool: Tool, workingDir: File): ToolStatus {

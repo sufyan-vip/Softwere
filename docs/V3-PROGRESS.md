@@ -43,7 +43,7 @@ if the code behind it really runs (RULE 3, no fake success).
 | --- | --- | --- |
 | 0 | Complete audit | DONE (this file) |
 | 1 | UI/UX rebuild: Projects, project details, agent workspace, terminal, dialogs, empty/loading/error | DONE — agent workspace timeline + state bar + session summary, project dashboard, ProjectDetailScreen, creation-flow type cards, terminal chrome and selectable output. Built green in CI |
-| 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | STARTED (type stored in metadata; Android scaffold pending Phase 11) |
+| 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | DONE — type metadata drives scaffold/preview/build/toolchain hints + agent prompt context; every template verifies the files it declares on disk; Android App still correctly gated to Phase 11 |
 | 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | TODO |
 | 4 | Code editor | TODO |
 | 5 | OpenRouter (models, keys, fallbacks) | TODO |
@@ -85,3 +85,31 @@ Deferred on purpose (later phases, listed so nothing is silently dropped): comma
 repair UI (7-8), GitHub (§29-33), Android build/install (§34-39), web export/download (§41-42), context
 budgeting (§19-20), storage manager (§52), multi-session terminal (§26), persistence migration to Room
 (§57) and the QA matrix (§58-59).
+
+## PHASE 2 — what this change set does (§11, §45, §60 Phase 2)
+
+The project type is no longer a label — it is real metadata the whole app consumes.
+
+1. **Type-aware defaults.** `ProjectType` now carries `defaultPort`, `devCommand`, `runCommand`,
+   `buildCommand`, `requiredTools` and `languages` per type. `Workspace.create` stamps the project's
+   `previewPort` from the chosen type instead of a hard-coded 5173.
+2. **Scaffold is provable (§3).** The file contents moved out of `Workspace` into a pure, unit-testable
+   `ProjectScaffold` object. `Template` now declares `declaredFiles`, and `ProjectScaffold.write` throws
+   if any declared file is missing after it writes — a template that claims a file it does not create is a
+   hard error, never silent. `ProjectScaffoldTest` asserts every template writes every declared file.
+3. **Preview is type-aware (§40-43).** `PreviewScreen` shows the project's real preview port and the
+   type's dev command (with a dedicated "Run default (<cmd>)" button), and the dev-command dialog is
+   pre-filled with the type's own command rather than a hard-coded `npm run dev`.
+4. **Toolchain hints (§21-23).** `Toolchains.CORE` grew `java` + `gradle` probes (both reported honestly,
+   never assumed present). The Toolchain screen now has a "This <type> needs" section listing the
+   current project's required tools with real availability status.
+5. **Agent prompt context (§45-46).** `HarnessViewModel.typeContext` injects the project's actual type,
+   language, run/dev/build commands, required tools and preview port into the system prompt, and
+   instructs the agent to only run commands that actually appear in the project files — no invented
+   commands.
+6. **Dashboard / detail are type-aware (§10, §12).** Project cards, the active banner, the search filter
+   and the detail screen now use `Project.kind` (icon/colour/preview/build info) instead of the raw
+   template id.
+
+`Android App` remains gated: it is selectable metadata-wise but not creatable until Phase 11 provides the
+real Gradle build/install pipeline, so it never produces a project that cannot be built (no fake success).

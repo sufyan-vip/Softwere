@@ -19,6 +19,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.data.Project
+import com.sufyan.harness.data.ProjectType
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.HarnessColors
 import com.sufyan.harness.ui.theme.Radius
@@ -48,7 +49,7 @@ fun ProjectsScreen(
     LaunchedEffect(Unit) { vm.refreshProjects() }
 
     val filtered = remember(projects, query, sort) {
-        projects.filter { it.name.contains(query, true) || it.template.contains(query, true) }
+        projects.filter { it.name.contains(query, true) || it.template.contains(query, true) || it.kind.label.contains(query, true) }
             .let {
                 when (sort) {
                     Sort.Recent -> it.sortedByDescending { p -> p.updatedAt }
@@ -209,7 +210,7 @@ private fun ActiveProjectBanner(
             Spacer(Modifier.height(Spacing.sm))
             Text(project.name, style = MaterialTheme.typography.headlineSmall)
             Text(
-                "${project.template} • ${vm.workspace.fileCount(project)} files • ${formatBytes(vm.workspace.sizeOf(project))}",
+                "${project.kind.label} • ${vm.workspace.fileCount(project)} files • ${formatBytes(vm.workspace.sizeOf(project))}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -236,13 +237,13 @@ private fun ProjectCard(
                 Modifier
                     .size(38.dp)
                     .clip(RoundedCornerShape(Radius.md))
-                    .background(accentFor(project.template).copy(alpha = 0.16f)),
+                    .background(accentFor(project.kind).copy(alpha = 0.16f)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    iconFor(project.template),
+                    iconFor(project.kind),
                     contentDescription = null,
-                    tint = accentFor(project.template),
+                    tint = accentFor(project.kind),
                     modifier = Modifier.size(20.dp),
                 )
             }
@@ -294,18 +295,20 @@ private fun ProjectCard(
     }
 }
 
-private fun iconFor(template: String) = when (template) {
-    "react" -> Icons.Default.Web
-    "node" -> Icons.Default.Dns
-    "web" -> Icons.Default.Language
-    else -> Icons.Default.Folder
+private fun iconFor(type: ProjectType) = when (type) {
+    ProjectType.WebApp -> Icons.Default.Web
+    ProjectType.Node -> Icons.Default.Dns
+    ProjectType.Website -> Icons.Default.Language
+    ProjectType.AndroidApp -> Icons.Default.Smartphone
+    ProjectType.Empty -> Icons.Default.Folder
 }
 
-private fun accentFor(template: String): Color = when (template) {
-    "react" -> HarnessColors.Info
-    "node" -> HarnessColors.Ok
-    "web" -> HarnessColors.Warn
-    else -> HarnessColors.Accent
+private fun accentFor(type: ProjectType): Color = when (type) {
+    ProjectType.WebApp -> HarnessColors.Info
+    ProjectType.Node -> HarnessColors.Ok
+    ProjectType.Website -> HarnessColors.Warn
+    ProjectType.AndroidApp -> HarnessColors.Accent
+    ProjectType.Empty -> HarnessColors.Accent
 }
 
 fun greeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {

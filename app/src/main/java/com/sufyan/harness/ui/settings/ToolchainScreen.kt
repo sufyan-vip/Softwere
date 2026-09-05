@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.runtime.RuntimeState
+import com.sufyan.harness.runtime.Toolchains
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.MonoStyle
 import com.sufyan.harness.ui.theme.Spacing
@@ -22,6 +23,8 @@ fun ToolchainScreen(vm: HarnessViewModel, onBack: () -> Unit) {
     val statuses by vm.toolStatuses.collectAsState()
     val scanning by vm.toolsScanning.collectAsState()
     val runtime by vm.linux.status.collectAsState()
+    val project by vm.active.collectAsState()
+    val type = project?.kind
 
     LaunchedEffect(Unit) {
         vm.refreshRuntime()
@@ -73,6 +76,41 @@ fun ToolchainScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                                 "Installation is deliberately refused rather than reporting a fake success. " +
                                 "The Android shell below still runs real commands.",
                         )
+                    }
+                }
+            }
+
+            if (type != null && type.requiredTools.isNotEmpty()) {
+                SectionHeader("This ${type.label} needs")
+                val byId = statuses.associateBy { it.tool.id }
+                if (statuses.isEmpty() && scanning) {
+                    LoadingState("Probing the tools this project needs...")
+                }
+                type.requiredTools.forEach { id ->
+                    val st = byId[id]
+                    HarnessCard {
+                        Row(Modifier.padding(Spacing.md), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(Toolchains.labelFor(id), style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    st?.tool?.description ?: "Required for this project type.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            StatusChip(
+                                when {
+                                    st == null -> "checking"
+                                    st.available -> "Available"
+                                    else -> "Missing"
+                                },
+                                when {
+                                    st == null -> StatusKind.Info
+                                    st.available -> StatusKind.Ok
+                                    else -> StatusKind.Neutral
+                                },
+                            )
+                        }
                     }
                 }
             }

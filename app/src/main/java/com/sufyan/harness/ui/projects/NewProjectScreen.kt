@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.data.ProjectType
+import com.sufyan.harness.runtime.Toolchains
 import com.sufyan.harness.ui.components.AppTopBar
 import com.sufyan.harness.ui.components.ErrorState
 import com.sufyan.harness.ui.components.HarnessCard
@@ -114,7 +115,21 @@ fun NewProjectScreen(vm: HarnessViewModel, onDone: () -> Unit) {
                             subtitle = chosen.languages,
                             icon = null,
                         )
-                        SettingRow("Runtime", subtitle = if (chosen == ProjectType.Node || chosen == ProjectType.WebApp) "Node — install from Toolchains" else "None needed", icon = null)
+                        SettingRow(
+                            "Runtime",
+                            subtitle = if (chosen.requiredTools.isEmpty()) "None needed" else chosen.requiredTools.joinToString(", ") { Toolchains.labelFor(it) },
+                            icon = null,
+                        )
+                        SettingRow(
+                            "Preview",
+                            subtitle = "port ${chosen.defaultPort} • ${chosen.devCommand ?: "built-in static server"}",
+                            icon = null,
+                        )
+                        SettingRow(
+                            "Build",
+                            subtitle = chosen.buildCommand ?: "no build step (source IS the project)",
+                            icon = null,
+                        )
                         SettingRow(
                             "Initialise a git repository",
                             subtitle = "Runs a real git init in the project directory",

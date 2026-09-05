@@ -142,6 +142,16 @@ fun ProjectDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
+                        "Preview: port ${project.previewPort} • ${project.kind.devCommand ?: "built-in static server"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "Build: ${project.kind.buildCommand ?: "no build step (source is the project)"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
                         vm.workspace.projectDir(project).absolutePath,
                         style = MonoStyle,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

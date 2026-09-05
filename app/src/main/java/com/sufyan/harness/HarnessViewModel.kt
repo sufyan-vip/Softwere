@@ -251,7 +251,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
             val extra = settings.systemPrompt.trim()
             apiHistory.add(
                 0,
-                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\nProject: ${project.name} (${project.template})" + if (extra.isNotEmpty()) "\n\n$extra" else ""),
+                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\n" + typeContext(project) + if (extra.isNotEmpty()) "\n\n$extra" else ""),
             )
         }
         apiHistory += ChatMessage("user", prompt)
@@ -306,6 +306,30 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                 reloadOpenTabs()
                 persistConversation()
             }
+        }
+    }
+
+    /**
+     * §45 — the agent gets the project's actual type plus the real commands it can run, so it never
+     * invents a build/preview command. Every line is derived from [Project.kind] metadata; a null
+     * command is reported as absent rather than guessed.
+     */
+    private fun typeContext(p: Project): String {
+        val k = p.kind
+        return buildString {
+            append("Project: ${p.name} (${k.label})")
+            append("\nType: ${k.id}")
+            if (k.languages.isNotBlank()) append("\nLanguage: ${k.languages}")
+            k.runCommand?.let { append("\nRun: $it") }
+            k.devCommand?.let { append("\nDev server: $it") }
+            k.buildCommand?.let { append("\nBuild: $it") }
+            if (k.requiredTools.isNotEmpty()) append("\nRequires: ${k.requiredTools.joinToString(", ")}")
+            append("\nPreview port: ${p.previewPort}")
+            append(
+                "\nRules for this project: only use run_command for a command that actually appears in " +
+                    "the project files (package.json scripts, build.gradle, etc.). Never guess a command. " +
+                    "After any edit, run the real build or dev command and report the actual output.",
+            )
         }
     }
 

@@ -55,6 +55,9 @@ fun PreviewScreen(vm: HarnessViewModel, onBack: () -> Unit) {
             EmptyState(Icons.Outlined.PlayCircle, "No project open", "Open a project to preview it.")
             return@Column
         }
+        // The `project` property is a delegated State read, so it does not smart-cast; take one
+        // snapshot of the non-null value for the rest of the composable.
+        val current = project!!
 
         if (!state.running) {
             Column(Modifier.padding(Spacing.lg), verticalArrangement = Arrangement.spacedBy(Spacing.md)) {
@@ -64,7 +67,23 @@ fun PreviewScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                     "Serve this project over a real local HTTP server on 127.0.0.1, then view it in the embedded browser.",
                 )
                 PrimaryButton("Start static server", { vm.startPreviewStatic() }, Modifier.fillMaxWidth(), icon = Icons.Default.PlayArrow)
-                SecondaryButton("Run a dev command", { showStartSheet = true }, Modifier.fillMaxWidth(), icon = Icons.Default.Terminal)
+                val type = current.kind
+                if (type.devCommand != null) {
+                    SecondaryButton(
+                        "Run default (${type.devCommand})",
+                        { showStartSheet = true },
+                        Modifier.fillMaxWidth(),
+                        icon = Icons.Default.Terminal,
+                    )
+                } else {
+                    SecondaryButton("Run a dev command", { showStartSheet = true }, Modifier.fillMaxWidth(), icon = Icons.Default.Terminal)
+                }
+                Text(
+                    "This ${type.label} previews on port ${current.previewPort}." +
+                        if (type.devCommand != null) " The dev command is \u201c${type.devCommand}\u201d." else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (state.console.isNotEmpty()) {
                     ConsolePanel(state.console)
                 }
@@ -108,30 +127,32 @@ fun PreviewScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                 ConsolePanel(state.console + consoleLines)
             }
         }
-    }
 
-    if (showStartSheet) {
-        var cmd by remember { mutableStateOf("npm run dev") }
-        AlertDialog(
-            onDismissRequest = { showStartSheet = false },
-            title = { Text("Run dev command") },
-            text = {
-                Column {
-                    Text(
-                        "The command runs in the project directory. Preview only opens if something actually listens on port ${project!!.previewPort}.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(Spacing.md))
-                    OutlinedTextField(value = cmd, onValueChange = { cmd = it }, singleLine = true, textStyle = MonoStyle)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { vm.startPreviewProcess(cmd); showStartSheet = false }) { Text("Run") }
-            },
-            dismissButton = { TextButton(onClick = { showStartSheet = false }) { Text("Cancel") } },
-            containerColor = MaterialTheme.colorScheme.surface,
-        )
+        if (showStartSheet) {
+            // Default the dialog to this project type's real dev command (§11/45): the field is never
+            // pre-filled with a command that does not apply to the chosen type.
+            var cmd by remember(current.id, showStartSheet) { mutableStateOf(current.kind.devCommand ?: "npm run dev") }
+            AlertDialog(
+                onDismissRequest = { showStartSheet = false },
+                title = { Text("Run dev command") },
+                text = {
+                    Column {
+                        Text(
+                            "The command runs in the project directory. Preview only opens if something actually listens on port ${current.previewPort}.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(Spacing.md))
+                        OutlinedTextField(value = cmd, onValueChange = { cmd = it }, singleLine = true, textStyle = MonoStyle)
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.startPreviewProcess(cmd); showStartSheet = false }) { Text("Run") }
+                },
+                dismissButton = { TextButton(onClick = { showStartSheet = false }) { Text("Cancel") } },
+                containerColor = MaterialTheme.colorScheme.surface,
+            )
+        }
     }
 }
 
