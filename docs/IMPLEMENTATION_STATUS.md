@@ -164,7 +164,7 @@ These are **not faked** — they probe, and they report unavailability honestly.
 
 ## APK
 
-The workflow `.github/workflows/android.yml` performs, on every push:
+The workflow in `ci/android-workflow.yml` performs, once activated (see `ci/README.md`):
 
 ```
 lintDebug → testDebugUnitTest → assembleDebug → assembleRelease → verify → upload

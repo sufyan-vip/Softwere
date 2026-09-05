@@ -28,9 +28,16 @@ Create Project → Tell AI what to build → AI inspects → AI edits files → 
 
 ## Getting the APK
 
-Built automatically by GitHub Actions on every push.
+The full CI pipeline lives in `ci/android-workflow.yml`. Activate it once (it could not be
+pushed directly into `.github/workflows/` — see [`ci/README.md`](ci/README.md)):
 
-**Actions** tab → latest **Build APK** run → **Artifacts** →
+```bash
+mkdir -p .github/workflows
+git mv ci/android-workflow.yml .github/workflows/android.yml
+git commit -m "Enable APK build workflow" && git push
+```
+
+Then: **Actions** tab → latest **Build APK** run → **Artifacts** →
 `sufyan-harness-debug-apk` or `sufyan-harness-release-apk`.
 
 > The release APK is signed with the debug key, because no release keystore is available in

@@ -130,7 +130,7 @@ execution.
 The sandbox this project was developed in has **no JDK, no Android SDK, and no network
 access to `dl.google.com`, `maven.google.com`, `repo1.maven.org` or `services.gradle.org`**,
 so the APK cannot be compiled locally. The APK is therefore produced by
-`.github/workflows/android.yml` on GitHub-hosted runners, which do have the Android SDK.
+`ci/android-workflow.yml` (see `ci/README.md` to activate) on GitHub-hosted runners, which do have the Android SDK.
 The workflow runs lint, unit tests, `assembleDebug` and `assembleRelease`, validates each
 APK (non-empty, contains `AndroidManifest.xml` and `classes.dex`), and uploads both as
 artifacts.
