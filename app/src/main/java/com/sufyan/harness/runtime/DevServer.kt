@@ -79,6 +79,9 @@ class DevServer(private val projectDir: File) {
                 launch { serve(client) }
             }
         }
+        // launch hands back a Job; the block has to end on Unit so that runCatching
+        // settles on the declared Result<Unit>.
+        Unit
     }.onFailure { log("Could not start server: ${it.message}") }
 
     private fun serve(client: Socket) {
