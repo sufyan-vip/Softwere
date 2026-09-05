@@ -56,7 +56,7 @@ object ProjectArchive {
                     rel.removePrefix("$commonRoot/")
                 } else rel
 
-                if (effective.isEmpty()) {
+                if (effective.isEmpty() || effective == commonRoot) {
                     zin.closeEntry()
                     continue
                 }
@@ -114,17 +114,21 @@ object ProjectArchive {
         return target
     }
 
-    /** Longest leading directory shared by all paths ("" when none). */
+    /**
+     * Longest leading *directory* shared by all paths. The final segment of each path is treated as a
+     * filename and never part of the common root, so a lone "project-foo/readme.md" strips to
+     * "project-foo" (meaning "readme.md" lands at the destination root) rather than to the whole path.
+     */
     private fun commonPrefix(paths: List<String>): String? {
         if (paths.isEmpty()) return null
-        val segments = paths.map { it.split('/') }
-        val first = segments.first()
+        val dirs = paths.map { it.split('/').dropLast(1) }
+        val first = dirs.first()
         val common = mutableListOf<String>()
         for (i in first.indices) {
-            if (segments.all { it.getOrNull(i) == first[i] }) common += first[i] else break
+            if (dirs.all { it.getOrNull(i) == first[i] }) common += first[i] else break
         }
         // Strip a single wrapping directory (GitHub "Download ZIP" style) so the project lands at
         // the destination root, not inside an extra folder.
-        return if (common.size >= 1) common.joinToString("/") else null
+        return if (common.isNotEmpty()) common.joinToString("/") else null
     }
 }
