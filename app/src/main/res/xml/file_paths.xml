@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- §41 — lets the app share the static exports/ directory through a content Uri. -->
+<paths>
+    <files-path name="exports" path="exports/" />
+</paths>

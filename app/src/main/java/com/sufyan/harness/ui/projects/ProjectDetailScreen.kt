@@ -1,5 +1,6 @@
 package com.sufyan.harness.ui.projects
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.HorizontalDivider
@@ -27,6 +29,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.ui.Routes
 import com.sufyan.harness.data.Project
@@ -78,6 +82,7 @@ fun ProjectDetailScreen(
 
     val files = vm.workspace.fileCount(project)
     val size = vm.workspace.sizeOf(project)
+    val context = LocalContext.current
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
@@ -207,6 +212,20 @@ fun ProjectDetailScreen(
                     icon = Icons.Default.Tune,
                     onClick = { vm.open(project); onNavigate(Routes.PROJECT_SETTINGS) },
                 )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Export as ZIP",
+                    subtitle = "Archives the real project files and shares them",
+                    icon = Icons.Default.Share,
+                    onClick = {
+                        vm.exportProject().fold(
+                            { file -> if (!shareZip(context, file, project.name)) {
+                                vm.notify("Exported, but no app could open the share sheet for this ZIP.")
+                            } },
+                            { e -> vm.notify(e.message ?: "Export failed") },
+                        )
+                    },
+                )
             }
 
             Text(
@@ -216,5 +235,27 @@ fun ProjectDetailScreen(
             )
             Spacer(Modifier.height(Spacing.xl))
         }
+    }
+}
+
+/** §41 — shares an exported zip via a content Uri (FileProvider), never the raw /files path. */
+private fun shareZip(context: android.content.Context, file: java.io.File, name: String): Boolean {
+    val uri = try {
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    } catch (e: Exception) {
+        return false
+    }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/zip"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, "$name (Sufyan Harness)")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    return try {
+        context.startActivity(Intent.createChooser(intent, "Export $name"))
+        true
+    } catch (e: Exception) {
+        false
     }
 }

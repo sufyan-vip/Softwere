@@ -1,6 +1,7 @@
 package com.sufyan.harness
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sufyan.harness.ai.*
@@ -56,6 +57,14 @@ data class UiMessage(
 )
 
 data class OpenTab(val path: String, var content: String, var dirty: Boolean = false)
+
+/** §52 — one snapshot of storage, computed from real directories, never estimated. */
+data class StorageSnapshot(
+    val projectsTotal: Long,
+    val runtimeSize: Long,
+    val exportsSize: Long,
+    val projects: List<Pair<String, Long>>,
+)
 
 class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -126,6 +135,54 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         refreshProjects()
     }
 
+    // ---- Phase 3: import / export / storage --------------------------------
+    /** §41 — zip the active project into <filesDir>/exports and return the file (real bytes). */
+    fun exportProject(): Result<File> {
+        val p = _active.value ?: return Result.failure(IllegalStateException("Open a project first."))
+        return runCatching {
+            val exports = File(application.filesDir, "exports").apply { mkdirs() }
+            val out = File(exports, "${p.id}.zip")
+            workspace.exportZip(p, out).getOrThrow()
+            out
+        }
+    }
+
+    fun exportsDir(): File = File(application.filesDir, "exports").apply { mkdirs() }
+
+    /** §41 — create a project from a picked zip (content Uri), reading the real bytes. */
+    fun importProjectFromUri(name: String, type: ProjectType, uri: Uri): Result<Project> = runCatching {
+        val tmp = File(application.cacheDir, "import-${System.currentTimeMillis()}.zip")
+        application.contentResolver.openInputStream(uri)?.use { input ->
+            tmp.outputStream().use { input.copyTo(it) }
+        } ?: throw IllegalStateException("Could not read the selected archive.")
+        val result = workspace.createFromZip(name, type, tmp)
+        tmp.delete()
+        result.getOrThrow()
+    }
+
+    /** §41 — create a project from a real folder on disk. */
+    fun importProjectFromFolder(name: String, type: ProjectType, dir: File): Result<Project> =
+        workspace.createFromFolder(name, type, dir)
+
+    /** §52 — snapshot of storage, aggregated from real directories. */
+    fun storageSnapshot(): StorageSnapshot {
+        val projects = workspace.list().map { it to workspace.sizeOf(it) }
+        val runtime = application.linux.rootfsDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        val exports = exportsDir().walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        return StorageSnapshot(
+            projectsTotal = projects.sumOf { it.second },
+            runtimeSize = runtime,
+            exportsSize = exports,
+            projects = projects.map { (p, s) -> (p.name to s) },
+        )
+    }
+
+    /** §52 — safe cleanup: does not touch project files. */
+    fun clearExports(): Result<Unit> = runCatching {
+        exportsDir().walkTopDown().filter { it.isFile }.forEach { it.delete() }
+        notify("Cleared exported archives.")
+    }
+
     fun renameProject(project: Project, name: String) {
         workspace.rename(project, name).fold({
             refreshProjects()
@@ -192,6 +249,27 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteEntry(relative: String) {
         files?.delete(relative)?.fold({ notify("Deleted $relative"); closeTab(relative) }, { notify(it.message ?: "Failed") })
+    }
+
+    /** Phase 3 — rename a file or directory in the browser; tabs are remapped if needed. */
+    fun renameEntry(relative: String, newName: String) {
+        val f = files ?: return
+        val result = f.rename(relative, newName)
+        result.fold({
+            val old = if (relative.contains('/')) relative.substringBeforeLast('/') + "/" + newName else newName
+            _tabs.value = _tabs.value.map { t ->
+                when {
+                    t.path == relative -> t.copy(path = old)
+                    t.path.startsWith("$relative/") -> t.copy(path = old + t.path.removePrefix(relative))
+                    else -> t
+                }
+            }
+            if (activeTab.value?.startsWith("$relative/") == true || activeTab.value == relative) {
+                _activeTab.value = _tabs.value.firstOrNull { it.path == old }?.path
+                    ?: _tabs.value.firstOrNull { it.path.startsWith(old) }?.path
+            }
+            notify("Renamed $relative → $newName")
+        }, { notify(it.message ?: "Rename failed") })
     }
 
     // ---- conversation -------------------------------------------------------

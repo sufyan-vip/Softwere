@@ -44,7 +44,7 @@ if the code behind it really runs (RULE 3, no fake success).
 | 0 | Complete audit | DONE (this file) |
 | 1 | UI/UX rebuild: Projects, project details, agent workspace, terminal, dialogs, empty/loading/error | DONE — agent workspace timeline + state bar + session summary, project dashboard, ProjectDetailScreen, creation-flow type cards, terminal chrome and selectable output. Built green in CI |
 | 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | DONE — type metadata drives scaffold/preview/build/toolchain hints + agent prompt context; every template verifies the files it declares on disk; Android App still correctly gated to Phase 11 |
-| 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | TODO |
+| 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | DONE — browser CRUD (create/rename/delete), real ZIP export + import, real folder import, search, per-project + total + runtime storage with a Storage manager |
 | 4 | Code editor | TODO |
 | 5 | OpenRouter (models, keys, fallbacks) | TODO |
 | 6 | True AI agent (planning, tool budget, verification) | TODO |
@@ -113,3 +113,24 @@ The project type is no longer a label — it is real metadata the whole app cons
 
 `Android App` remains gated: it is selectable metadata-wise but not creatable until Phase 11 provides the
 real Gradle build/install pipeline, so it never produces a project that cannot be built (no fake success).
+
+## PHASE 3 — what this change set does (§60 Phase 3, §41, §52)
+
+File system completeness, real import/export and a storage manager.
+
+1. **Browser CRUD is now complete.** Long-pressing a file/folder opens a menu with Rename and Delete
+   (delete is behind a confirm dialog). `ProjectFiles.rename` was already there but unused — it is now
+   wired (tab paths are remapped on rename). Create-file/folder and search were already working.
+2. **Real ZIP export (§41).** `ProjectArchive.exportZip` writes the true bytes of every project file into
+   a `.zip`. The Project detail screen exposes "Export as ZIP" which writes to `<filesDir>/exports/` and
+   shares it through a `FileProvider` content Uri (never the raw path).
+3. **Real ZIP import (§41).** A SAF `GetContent` picker on the New Project screen imports a zip as a new
+   project (`Workspace.createFromZip`), reading the actual bytes via the content resolver. Zip-slip is
+   blocked, and a single wrapping folder (GitHub "Download ZIP" style) is stripped. `importFolder` copies
+   a real folder into a new/current project.
+4. **Storage manager (§52).** New Storage screen shows per-project size, the Linux runtime rootfs size,
+   the exports folder and a real total, plus safe cleanup (clear exported archives, clear terminal logs).
+   Project files are never deleted silently.
+
+`ProjectArchiveTest` covers export→import round-trip, zip-slip refusal, top-level-folder stripping and
+folder copy.

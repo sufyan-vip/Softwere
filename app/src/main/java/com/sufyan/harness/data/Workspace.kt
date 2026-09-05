@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.IOException
 
 /**
  * §11 of the V3 spec — what the user said they are building. This is stored in the project
@@ -183,6 +184,59 @@ class Workspace(private val context: Context) {
 
     fun fileCount(project: Project): Int =
         projectDir(project).walkTopDown().count { it.isFile }
+
+    /** Total bytes used by every project (§52). */
+    fun totalSize(): Long = list().sumOf { sizeOf(it) }
+
+    /**
+     * §41 — creates a project and fills it from a real zip archive. The directory is created first,
+     * then the archive is extracted; no template scaffold is applied, because the archive *is* the
+     * project.
+     */
+    fun createFromZip(name: String, type: ProjectType, zipFile: File): Result<Project> = runCatching {
+        val clean = name.trim()
+        require(clean.isNotEmpty()) { "Project name cannot be empty." }
+        require(list().none { it.name.equals(clean, ignoreCase = true) }) { "A project named \"$clean\" already exists." }
+        val dir = File(root, idFor(clean, type))
+        check(dir.mkdirs()) { "Could not create project directory." }
+        ProjectArchive.importZip(dir, zipFile).getOrThrow()
+        val now = System.currentTimeMillis()
+        val project = Project(dir.name, clean, type.template.id, now, now, previewPort = type.defaultPort, type = type.id)
+        save(list() + project)
+        project
+    }
+
+    /** §41 — creates a project and copies a folder's real files into it. */
+    fun createFromFolder(name: String, type: ProjectType, srcDir: File): Result<Project> = runCatching {
+        val clean = name.trim()
+        require(clean.isNotEmpty()) { "Project name cannot be empty." }
+        require(list().none { it.name.equals(clean, ignoreCase = true) }) { "A project named \"$clean\" already exists." }
+        val dir = File(root, idFor(clean, type))
+        check(dir.mkdirs()) { "Could not create project directory." }
+        ProjectArchive.importFolder(dir, srcDir).getOrThrow()
+        val now = System.currentTimeMillis()
+        val project = Project(dir.name, clean, type.template.id, now, now, previewPort = type.defaultPort, type = type.id)
+        save(list() + project)
+        project
+    }
+
+    /** §41 — merges a folder's files into an existing project (used for "import into this project"). */
+    fun mergeFolder(project: Project, srcDir: File): Result<Unit> = runCatching {
+        ProjectArchive.importFolder(projectDir(project), srcDir).getOrThrow()
+        touch(project)
+    }
+
+    /** §41 — zip the project (real bytes) into [dest]. */
+    fun exportZip(project: Project, dest: File): Result<Unit> {
+        val dir = projectDir(project)
+        if (!dir.isDirectory) return Result.failure(IOException("Project directory is missing."))
+        return ProjectArchive.exportZip(dir, dest)
+    }
+
+    private fun idFor(clean: String, type: ProjectType): String {
+        val stem = clean.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifEmpty { "project" }
+        return "$stem-${System.currentTimeMillis().toString(36)}"
+    }
 }
 
 /**

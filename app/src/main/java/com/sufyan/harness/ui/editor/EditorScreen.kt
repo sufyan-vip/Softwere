@@ -44,6 +44,9 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
     var showTree by remember { mutableStateOf(true) }
     var newEntry by remember { mutableStateOf<String?>(null) }
     var searchQuery by remember { mutableStateOf<String?>(null) }
+    var menuPath by remember { mutableStateOf<String?>(null) }
+    var renamePath by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         AppTopBar(
@@ -99,7 +102,7 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
                                 isOpen = rel in expanded,
                                 selected = rel == activePath,
                                 onClick = { if (node.isDir) vm.toggleDir(rel) else vm.openFile(rel) },
-                                onLongClick = { vm.deleteEntry(rel) },
+                                onLongClick = { menuPath = rel },
                             )
                         }
                     }
@@ -221,7 +224,7 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
                 if (value.length > 1 && results.isEmpty()) {
                     Text("No matches.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                LazyColumn { items(results) { r ->
+                    LazyColumn { items(results) { r ->
                     Text(
                         r,
                         style = MonoStyle.copy(fontSize = 11.sp),
@@ -234,8 +237,63 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
             }
         }
     }
+
+    menuPath?.let { rel ->
+        ModalBottomSheet(onDismissRequest = { menuPath = null }, containerColor = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.padding(bottom = Spacing.xl)) {
+                Text(
+                    rel.substringAfterLast('/'),
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+                )
+                SettingRow("Rename", "Change this file or folder's name", Icons.Default.DriveFileRenameOutline, onClick = {
+                    renamePath = rel; menuPath = null
+                })
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow("Delete", "Permanently removes it", Icons.Default.DeleteOutline, onClick = {
+                    confirmDelete = rel; menuPath = null
+                })
+            }
+        }
+    }
+
+    renamePath?.let { rel ->
+        var value by remember(rel) { mutableStateOf(rel.substringAfterLast('/')) }
+        AlertDialog(
+            onDismissRequest = { renamePath = null },
+            title = { Text("Rename") },
+            text = {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    singleLine = true,
+                    label = { Text("New name") },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.renameEntry(rel, value.trim().substringAfterLast('/'))
+                    renamePath = null
+                }) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renamePath = null }) { Text("Cancel") } },
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
+
+    confirmDelete?.let { rel ->
+        ConfirmDialog(
+            "Delete ${rel.substringAfterLast('/')}?",
+            "This permanently removes the file or folder from the project. This cannot be undone.",
+            "Delete",
+            destructive = true,
+            onConfirm = { vm.deleteEntry(rel); confirmDelete = null },
+            onDismiss = { confirmDelete = null },
+        )
+    }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(
     name: String,
@@ -250,7 +308,7 @@ private fun FileRow(
         Modifier
             .fillMaxWidth()
             .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(start = Spacing.lg + (depth * 14).dp, end = Spacing.lg, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -27,6 +27,7 @@ fun SettingsScreen(
     onThemeChanged: (ThemeMode) -> Unit,
     onModels: () -> Unit,
     onToolchains: () -> Unit,
+    onStorage: () -> Unit,
 ) {
     val s = vm.settings
     var keyInput by remember { mutableStateOf("") }
@@ -188,7 +189,15 @@ fun SettingsScreen(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow("Clear all credentials", "Removes stored keys from this device", Icons.Default.LockReset, onClick = { confirmClear = true })
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                SettingRow("Workspace", vm.workspace.root.absolutePath, Icons.Default.Storage)
+                SettingRow(
+                    "Storage",
+                    "Projects, runtime and exports in use on this device",
+                    Icons.Default.Storage,
+                    trailing = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
+                    onClick = onStorage,
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow("Workspace", vm.workspace.root.absolutePath, Icons.Default.Folder)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow(
                     "Privacy",
