@@ -1,0 +1,488 @@
+package com.sufyan.harness
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.sufyan.harness.ai.*
+import com.sufyan.harness.data.*
+import com.sufyan.harness.runtime.*
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import java.io.File
+
+@Serializable
+data class ToolActivity(
+    val id: String,
+    val name: String,
+    val summary: String,
+    val done: Boolean = false,
+    val ok: Boolean = true,
+    val detail: String = "",
+)
+
+@Serializable
+data class UiMessage(
+    val role: String,          // "user" | "assistant" | "error" | "status"
+    var text: String,
+    var tools: List<ToolActivity> = emptyList(),
+    val timestamp: Long = System.currentTimeMillis(),
+)
+
+data class OpenTab(val path: String, var content: String, var dirty: Boolean = false)
+
+class HarnessViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val application get() = getApplication<HarnessApp>()
+    val workspace get() = application.workspace
+    val settings get() = application.settings
+    val secure get() = application.secure
+    val provider get() = application.provider
+    val linux get() = application.linux
+    val toolchains get() = application.toolchains
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    // ---- projects -----------------------------------------------------------
+    private val _projects = MutableStateFlow<List<Project>>(emptyList())
+    val projects = _projects.asStateFlow()
+
+    private val _active = MutableStateFlow<Project?>(null)
+    val active = _active.asStateFlow()
+
+    private val _toast = MutableStateFlow<String?>(null)
+    val toast = _toast.asStateFlow()
+
+    fun notify(msg: String) { _toast.value = msg }
+    fun clearToast() { _toast.value = null }
+
+    val projectDir: File? get() = _active.value?.let { workspace.projectDir(it) }
+    val files: ProjectFiles? get() = projectDir?.let { ProjectFiles(it) }
+
+    init {
+        refreshProjects()
+        settings.lastProjectId?.let { id -> _projects.value.find { it.id == id }?.let { open(it) } }
+    }
+
+    fun refreshProjects() { _projects.value = workspace.list() }
+
+    fun createProject(name: String, template: Template): Result<Project> =
+        workspace.create(name, template).onSuccess {
+            refreshProjects()
+            open(it)
+        }
+
+    fun open(project: Project) {
+        _active.value = project
+        settings.lastProjectId = project.id
+        _tabs.value = emptyList()
+        _activeTab.value = null
+        _messages.value = loadConversation(project)
+        _git.value = null
+        _checkpoints.value = emptyList()
+        devServer = DevServer(workspace.projectDir(project))
+        refreshGit()
+        refreshCheckpoints()
+    }
+
+    fun closeProject() {
+        stopShell()
+        devServer?.stop()
+        _active.value = null
+        settings.lastProjectId = null
+    }
+
+    fun deleteProject(project: Project) {
+        if (_active.value?.id == project.id) closeProject()
+        workspace.delete(project).fold({ notify("Deleted ${project.name}") }, { notify(it.message ?: "Delete failed") })
+        refreshProjects()
+    }
+
+    fun renameProject(project: Project, name: String) {
+        workspace.rename(project, name).fold({
+            refreshProjects()
+            if (_active.value?.id == project.id) _active.value = workspace.list().find { it.id == project.id }
+        }, { notify(it.message ?: "Rename failed") })
+    }
+
+    // ---- editor -------------------------------------------------------------
+    private val _tabs = MutableStateFlow<List<OpenTab>>(emptyList())
+    val tabs = _tabs.asStateFlow()
+    private val _activeTab = MutableStateFlow<String?>(null)
+    val activeTab = _activeTab.asStateFlow()
+    private val _expanded = MutableStateFlow<Set<String>>(emptySet())
+    val expanded = _expanded.asStateFlow()
+
+    fun toggleDir(path: String) {
+        _expanded.value = if (path in _expanded.value) _expanded.value - path else _expanded.value + path
+    }
+
+    fun openFile(relative: String) {
+        val f = files ?: return
+        if (_tabs.value.any { it.path == relative }) {
+            _activeTab.value = relative
+            return
+        }
+        f.read(relative).fold(
+            { content ->
+                _tabs.value = (_tabs.value + OpenTab(relative, content)).takeLast(8)
+                _activeTab.value = relative
+            },
+            { notify(it.message ?: "Could not open file") },
+        )
+    }
+
+    fun updateTab(path: String, content: String) {
+        _tabs.value = _tabs.value.map { if (it.path == path) it.copy(content = content, dirty = true) else it }
+    }
+
+    fun saveTab(path: String) {
+        val f = files ?: return
+        val tab = _tabs.value.find { it.path == path } ?: return
+        f.write(path, tab.content).fold({
+            _tabs.value = _tabs.value.map { if (it.path == path) it.copy(dirty = false) else it }
+            _active.value?.let { workspace.touch(it); refreshProjects() }
+            notify("Saved $path")
+            refreshGit()
+        }, { notify(it.message ?: "Save failed") })
+    }
+
+    fun closeTab(path: String) {
+        _tabs.value = _tabs.value.filterNot { it.path == path }
+        if (_activeTab.value == path) _activeTab.value = _tabs.value.lastOrNull()?.path
+    }
+
+    fun selectTab(path: String) { _activeTab.value = path }
+
+    fun createFile(relative: String) {
+        files?.createFile(relative)?.fold({ notify("Created $relative"); openFile(relative) }, { notify(it.message ?: "Failed") })
+    }
+
+    fun createDir(relative: String) {
+        files?.createDir(relative)?.fold({ notify("Created $relative/") }, { notify(it.message ?: "Failed") })
+    }
+
+    fun deleteEntry(relative: String) {
+        files?.delete(relative)?.fold({ notify("Deleted $relative"); closeTab(relative) }, { notify(it.message ?: "Failed") })
+    }
+
+    // ---- conversation -------------------------------------------------------
+    private val _messages = MutableStateFlow<List<UiMessage>>(emptyList())
+    val messages = _messages.asStateFlow()
+    private val _generating = MutableStateFlow(false)
+    val generating = _generating.asStateFlow()
+    private var agentJob: Job? = null
+    private val apiHistory = mutableListOf<ChatMessage>()
+
+    private fun conversationFile(project: Project) = File(workspace.projectDir(project).parentFile, "${project.id}.chat.json")
+
+    private fun loadConversation(project: Project): List<UiMessage> {
+        val f = conversationFile(project)
+        if (!f.exists()) return emptyList()
+        val loaded = runCatching { json.decodeFromString<List<UiMessage>>(f.readText()) }.getOrElse { emptyList() }
+        apiHistory.clear()
+        loaded.forEach {
+            when (it.role) {
+                "user" -> apiHistory += ChatMessage("user", it.text)
+                "assistant" -> if (it.text.isNotBlank()) apiHistory += ChatMessage("assistant", it.text)
+            }
+        }
+        return loaded
+    }
+
+    private fun persistConversation() {
+        val p = _active.value ?: return
+        runCatching { conversationFile(p).writeText(json.encodeToString(_messages.value)) }
+    }
+
+    fun clearConversation() {
+        _messages.value = emptyList()
+        apiHistory.clear()
+        persistConversation()
+    }
+
+    fun send(prompt: String) {
+        val project = _active.value ?: return notify("Open a project first.")
+        val f = files ?: return
+        if (prompt.isBlank()) return
+        if (!secure.hasApiKey()) {
+            _messages.value = _messages.value + UiMessage("error", "No OpenRouter API key configured. Add one in Settings → AI, then retry.")
+            return
+        }
+
+        _messages.value = _messages.value + UiMessage("user", prompt)
+        val assistant = UiMessage("assistant", "")
+        _messages.value = _messages.value + assistant
+        persistConversation()
+
+        if (apiHistory.none { it.role == "system" }) {
+            val extra = settings.systemPrompt.trim()
+            apiHistory.add(
+                0,
+                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\nProject: ${project.name} (${project.template})" + if (extra.isNotEmpty()) "\n\n$extra" else ""),
+            )
+        }
+        apiHistory += ChatMessage("user", prompt)
+
+        val tools = AgentTools(f, workspace.projectDir(project), commandsEnabled = true)
+        val agent = Agent(provider, tools)
+        val model = project.modelId ?: settings.modelId
+
+        _generating.value = true
+        agentJob = viewModelScope.launch {
+            try {
+                agent.run(model, apiHistory, settings.temperature).collect { ev ->
+                    when (ev) {
+                        is AgentEvent.TextDelta -> mutateLast { it.copy(text = it.text + ev.delta) }
+                        is AgentEvent.Status -> mutateLast { it.copy(text = it.text) }
+                        is AgentEvent.ToolStarted -> mutateLast {
+                            it.copy(tools = it.tools + ToolActivity(ev.id, ev.name, ev.summary))
+                        }
+                        is AgentEvent.ToolFinished -> mutateLast { m ->
+                            m.copy(
+                                tools = m.tools.map { t ->
+                                    if (t.id == ev.id) t.copy(done = true, ok = ev.ok, summary = ev.summary, detail = ev.detail) else t
+                                },
+                            )
+                        }
+                        is AgentEvent.Failed ->
+                            _messages.value = _messages.value + UiMessage("error", "${ev.error.title}\n\n${ev.error.detail}")
+                        AgentEvent.TurnFinished -> Unit
+                    }
+                }
+            } finally {
+                _generating.value = false
+                workspace.touch(project)
+                refreshProjects()
+                refreshGit()
+                reloadOpenTabs()
+                persistConversation()
+            }
+        }
+    }
+
+    private fun mutateLast(block: (UiMessage) -> UiMessage) {
+        val list = _messages.value.toMutableList()
+        val idx = list.indexOfLast { it.role == "assistant" }
+        if (idx >= 0) { list[idx] = block(list[idx]); _messages.value = list }
+    }
+
+    fun stopGeneration() {
+        agentJob?.cancel()
+        _generating.value = false
+        notify("Generation stopped.")
+    }
+
+    fun retryLast() {
+        val lastUser = _messages.value.lastOrNull { it.role == "user" } ?: return
+        _messages.value = _messages.value.dropLastWhile { it.role != "user" }.dropLast(1)
+        send(lastUser.text)
+    }
+
+    private fun reloadOpenTabs() {
+        val f = files ?: return
+        _tabs.value = _tabs.value.map { tab ->
+            if (tab.dirty) tab else f.read(tab.path).fold({ tab.copy(content = it) }, { tab })
+        }
+    }
+
+    // ---- models -------------------------------------------------------------
+    private val _models = MutableStateFlow<List<ModelInfo>>(emptyList())
+    val models = _models.asStateFlow()
+    private val _modelsError = MutableStateFlow<String?>(null)
+    val modelsError = _modelsError.asStateFlow()
+    private val _modelsLoading = MutableStateFlow(false)
+    val modelsLoading = _modelsLoading.asStateFlow()
+
+    fun loadModels() {
+        if (_modelsLoading.value) return
+        _modelsLoading.value = true
+        _modelsError.value = null
+        viewModelScope.launch {
+            provider.listModels().fold(
+                { _models.value = it },
+                { _modelsError.value = it.message ?: "Could not load the model list." },
+            )
+            _modelsLoading.value = false
+        }
+    }
+
+    fun selectModel(id: String) {
+        settings.modelId = id
+        settings.pushRecentModel(id)
+        _active.value?.let { p -> p.modelId = id; workspace.update(p); _active.value = p.copy() }
+        notify("Model set to $id")
+    }
+
+    // ---- api key ------------------------------------------------------------
+    private val _connectionResult = MutableStateFlow<String?>(null)
+    val connectionResult = _connectionResult.asStateFlow()
+
+    fun saveApiKey(key: String) {
+        secure.setApiKey(key)
+        _connectionResult.value = null
+        notify("API key saved securely.")
+    }
+
+    fun clearApiKey() {
+        secure.clearApiKey()
+        _connectionResult.value = null
+        notify("API key removed.")
+    }
+
+    fun testConnection() {
+        _connectionResult.value = "Testing..."
+        viewModelScope.launch {
+            provider.testConnection().fold(
+                { _connectionResult.value = it },
+                { _connectionResult.value = "Failed: ${it.message}" },
+            )
+        }
+    }
+
+    // ---- terminal -----------------------------------------------------------
+    private var shell: ShellSession? = null
+    private val _terminalLines = MutableStateFlow<List<TermLine>>(emptyList())
+    val terminalLines = _terminalLines.asStateFlow()
+    private val _shellRunning = MutableStateFlow(false)
+    val shellRunning = _shellRunning.asStateFlow()
+    val commandHistory = mutableListOf<String>()
+
+    fun startShell() {
+        val dir = projectDir ?: return notify("Open a project first.")
+        if (shell != null) return
+        val s = ShellSession(dir)
+        shell = s
+        s.start().onFailure { notify(it.message ?: "Shell failed to start.") }
+        _shellRunning.value = true
+        viewModelScope.launch { s.lines.collect { _terminalLines.value = it } }
+    }
+
+    fun runCommand(cmd: String) {
+        if (shell == null) startShell()
+        commandHistory += cmd
+        shell?.send(cmd)
+    }
+
+    fun interruptShell() = shell?.interrupt() ?: Unit
+    fun clearTerminal() { shell?.clear(); _terminalLines.value = emptyList() }
+
+    fun stopShell() {
+        shell?.dispose()
+        shell = null
+        _shellRunning.value = false
+    }
+
+    // ---- toolchains ---------------------------------------------------------
+    private val _tools = MutableStateFlow<List<ToolStatus>>(emptyList())
+    val toolStatuses = _tools.asStateFlow()
+    private val _toolsScanning = MutableStateFlow(false)
+    val toolsScanning = _toolsScanning.asStateFlow()
+
+    fun scanToolchains() {
+        if (_toolsScanning.value) return
+        _toolsScanning.value = true
+        viewModelScope.launch {
+            _tools.value = toolchains.detectAll(projectDir ?: workspace.root)
+            _toolsScanning.value = false
+        }
+    }
+
+    fun refreshRuntime() { viewModelScope.launch { linux.refresh() } }
+
+    // ---- preview ------------------------------------------------------------
+    var devServer: DevServer? = null
+        private set
+
+    fun startPreviewStatic() {
+        val p = _active.value ?: return notify("Open a project first.")
+        devServer?.startStatic(p.previewPort)?.onSuccess {
+            RuntimeService.start(application, "Preview server running for ${p.name}")
+        }?.onFailure { notify(it.message ?: "Server failed to start.") }
+    }
+
+    fun startPreviewProcess(command: String) {
+        val p = _active.value ?: return notify("Open a project first.")
+        viewModelScope.launch {
+            devServer?.startProcess(command, p.previewPort)?.onSuccess {
+                RuntimeService.start(application, "Dev server running for ${p.name}")
+            }?.onFailure { notify(it.message ?: "Dev server failed.") }
+        }
+    }
+
+    fun stopPreview() {
+        devServer?.stop()
+        RuntimeService.stop(application)
+    }
+
+    // ---- git & checkpoints --------------------------------------------------
+    private val _git = MutableStateFlow<GitStatus?>(null)
+    val git = _git.asStateFlow()
+    private val _diff = MutableStateFlow<String?>(null)
+    val diff = _diff.asStateFlow()
+    private val _log = MutableStateFlow<List<String>>(emptyList())
+    val gitLog = _log.asStateFlow()
+
+    private val gitService: GitService? get() = projectDir?.let { GitService(it, linux) }
+    private val checkpointStore: CheckpointStore? get() = projectDir?.let { CheckpointStore(it, application.filesDir) }
+
+    private val _checkpoints = MutableStateFlow<List<Checkpoint>>(emptyList())
+    val checkpoints = _checkpoints.asStateFlow()
+
+    fun refreshGit() {
+        val g = gitService ?: return
+        viewModelScope.launch {
+            _git.value = g.status()
+            _log.value = g.log().getOrElse { emptyList() }
+        }
+    }
+
+    fun gitInit() {
+        val g = gitService ?: return
+        viewModelScope.launch {
+            g.init().fold({ notify("Repository initialised."); refreshGit() }, { notify(it.message ?: "git init failed") })
+        }
+    }
+
+    fun loadDiff() {
+        val g = gitService ?: return
+        viewModelScope.launch {
+            _diff.value = g.diff().getOrElse { "Could not produce a diff: ${it.message}" }
+        }
+    }
+
+    fun commit(message: String) {
+        val g = gitService ?: return
+        viewModelScope.launch {
+            g.commit(message).fold({ notify("Committed."); refreshGit() }, { notify(it.message ?: "Commit failed") })
+        }
+    }
+
+    fun refreshCheckpoints() { _checkpoints.value = checkpointStore?.list() ?: emptyList() }
+
+    fun createCheckpoint(label: String) {
+        checkpointStore?.create(label)?.fold({ notify("Checkpoint saved."); refreshCheckpoints() }, { notify(it.message ?: "Failed") })
+    }
+
+    fun restoreCheckpoint(cp: Checkpoint) {
+        checkpointStore?.restore(cp)?.fold({
+            notify("Restored “${cp.label}”.")
+            reloadOpenTabs()
+            refreshGit()
+        }, { notify(it.message ?: "Restore failed") })
+    }
+
+    fun deleteCheckpoint(cp: Checkpoint) {
+        checkpointStore?.delete(cp)?.onSuccess { refreshCheckpoints() }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopShell()
+        devServer?.stop()
+    }
+}

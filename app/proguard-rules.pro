@@ -1,0 +1,3 @@
+-keepattributes *Annotation*, InnerClasses
+-dontwarn okhttp3.**
+-dontwarn org.conscrypt.**
