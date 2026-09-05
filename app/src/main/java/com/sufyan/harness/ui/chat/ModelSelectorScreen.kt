@@ -62,7 +62,7 @@ fun ModelSelectorScreen(vm: HarnessViewModel, onBack: () -> Unit) {
             subtitle = if (models.isEmpty()) "OpenRouter" else "${models.size} models on OpenRouter",
             onBack = onBack,
             actions = {
-                IconButton(onClick = { vm.loadModels() }) { Icon(Icons.Default.Refresh, contentDescription = "Reload models") }
+                IconButton(onClick = { vm.loadModels(force = true) }) { Icon(Icons.Default.Refresh, contentDescription = "Reload models") }
             },
         )
 
@@ -120,7 +120,23 @@ private fun ModelRow(model: ModelInfo, selected: Boolean, onClick: () -> Unit) {
                 Spacer(Modifier.height(Spacing.xs))
                 Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                     model.contextLength?.let { StatusChip("${it / 1000}K ctx") }
-                    if (model.isFree) StatusChip("Free", StatusKind.Ok)
+                    if (model.isFree) {
+                        StatusChip("Free", StatusKind.Ok)
+                    } else {
+                        // §50 — real per-million pricing from OpenRouter, never invented.
+                        model.promptPrice?.let { p ->
+                            StatusChip(
+                                "\$${"%.4f".format(p)} / M in",
+                                StatusKind.Neutral,
+                            )
+                        }
+                        model.completionPrice?.let { c ->
+                            StatusChip(
+                                "\$${"%.4f".format(c)} / M out",
+                                StatusKind.Neutral,
+                            )
+                        }
+                    }
                 }
             }
             if (selected) {

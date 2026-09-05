@@ -53,6 +53,7 @@ data class UiMessage(
     val role: String,          // "user" | "assistant" | "error" | "status"
     var text: String,
     var tools: List<ToolActivity> = emptyList(),
+    var usage: Usage? = null,  // §50 — only set when the provider reports real token usage
     val timestamp: Long = System.currentTimeMillis(),
 )
 
@@ -119,6 +120,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         refreshProjects()
+        (provider as? OpenRouterProvider)?.endpointValue = settings.endpoint.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
         settings.lastProjectId?.let { id -> _projects.value.find { it.id == id }?.let { open(it) } }
     }
 
@@ -397,6 +399,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                                 },
                             )
                         }
+                        is AgentEvent.Usage -> mutateLast { m -> m.copy(usage = ev.usage) }
                         is AgentEvent.Failed -> {
                             _agentPhase.value = AgentPhase.Failed
                             _agentStatus.value = ev.error.title
@@ -488,17 +491,24 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     private val _modelsLoading = MutableStateFlow(false)
     val modelsLoading = _modelsLoading.asStateFlow()
 
-    fun loadModels() {
+    fun loadModels(force: Boolean = false) {
         if (_modelsLoading.value) return
         _modelsLoading.value = true
         _modelsError.value = null
         viewModelScope.launch {
-            provider.listModels().fold(
+            provider.listModels(force).fold(
                 { _models.value = it },
                 { _modelsError.value = it.message ?: "Could not load the model list." },
             )
             _modelsLoading.value = false
         }
+    }
+
+    /** §5 — point the provider at a compatible endpoint; blank restores the OpenRouter default. */
+    fun setEndpoint(url: String) {
+        settings.endpoint = url
+        (provider as? OpenRouterProvider)?.endpointValue = url.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
+        notify("Endpoint set to ${url.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }}")
     }
 
     fun selectModel(id: String) {

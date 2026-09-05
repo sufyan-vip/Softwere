@@ -9,6 +9,7 @@ sealed interface AgentEvent {
     data class TextDelta(val delta: String) : AgentEvent
     data class ToolStarted(val id: String, val name: String, val summary: String, val target: String) : AgentEvent
     data class ToolFinished(val id: String, val ok: Boolean, val summary: String, val detail: String) : AgentEvent
+    data class Usage(val usage: com.sufyan.harness.ai.Usage) : AgentEvent
     data class Failed(val error: AiError) : AgentEvent
     data object TurnFinished : AgentEvent
 }
@@ -55,6 +56,7 @@ class Agent(
                         emit(AgentEvent.TextDelta(ev.delta))
                     }
                     is StreamEvent.Tools -> pendingTools = ev.calls
+                    is StreamEvent.Usage -> emit(AgentEvent.Usage(ev.usage))
                     is StreamEvent.Failed -> {
                         failed = true
                         emit(AgentEvent.Failed(ev.error))

@@ -46,7 +46,7 @@ if the code behind it really runs (RULE 3, no fake success).
 | 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | DONE — type metadata drives scaffold/preview/build/toolchain hints + agent prompt context; every template verifies the files it declares on disk; Android App still correctly gated to Phase 11 |
 | 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | DONE — browser CRUD (create/rename/delete), real ZIP export + import, real folder import, search, per-project + total + runtime storage with a Storage manager |
 | 4 | Code editor (syntax, tabs, search, replace, save, undo, AI actions) | DONE — tabs, dirty state, save, line numbers, lightweight syntax highlight, project search, in-file find/replace with match count, undo stack, editor AI actions routed to the chat composer |
-| 5 | OpenRouter (models, keys, fallbacks) | TODO |
+| 5 | OpenRouter (models, keys, fallbacks) | IN PROGRESS — real key storage, model selector, streaming, tool-call accumulation, usage/cost, retry/backoff, configurable endpoint; cancellation + persistence verified below |
 | 6 | True AI agent (planning, tool budget, verification) | TODO |
 | 7 | Terminal repair | TODO |
 | 8 | Linux / PRoot runtime | TODO |
@@ -152,3 +152,32 @@ The editor is usable for real editing workflows.
 
 (Previously-present tabs, dirty state, save, line numbers, keyword highlighting and project search are
 retained; the `combinedClickable` import needed for the long-press row was also fixed.)
+
+## PHASE 5 — what this change set does (§60 Phase 5, §50)
+
+OpenRouter is now a real, configurable provider rather than a hard-coded stream.
+
+1. **Secure API key.** The key lives in `SecureStore` (Android Keystore), set/verified/tested from Settings
+   → AI. It is never logged, never echoed back in full, and the settings screen only shows a masked form.
+2. **Real model list.** `OpenRouterProvider.listModels` fetches `/models`, reads the real `id`, `name`,
+   `context_length` and per-million `pricing`, and caches it in memory for 10 minutes. A manual refresh
+   bypasses the cache (`loadModels(force = true)`).
+3. **Model selector.** A searchable, categorised picker (Recent / Fast / Coding / Reasoning / Low Cost /
+   Premium / All) that applies the real pricing as per-million chips and shows real context length. Free
+   models are flagged from real pricing, never guessed.
+4. **Streaming + tool calls.** SSE is parsed line-by-line; content deltas stream into the message and tool
+   call fragments are accumulated by index across deltas (real `ToolCall`s). The assistant's tool calls are
+   stored in the history and replayed on the next turn.
+5. **Retry / backoff.** `stream()` retries up to 3 times. 429 honours the `Retry-After` header; other 5xx /
+   IO errors back off exponentially (1s, 2s). The last attempt surfaces the real error instead of retrying.
+6. **Real usage / cost (§50).** The final SSE `usage` chunk is parsed into a real `Usage` (prompt / completion
+   / total tokens) and propagated through `AgentEvent.Usage` → `UiMessage.usage`. The chat renders a compact
+   usage line only when tokens are non-zero, and an approximate cost only when the selected model's real
+   per-million pricing is known — never invented.
+7. **Configurable endpoint.** Settings → AI has an Endpoint field; blank restores the OpenRouter default
+   (`https://openrouter.ai/api/v1`), and any compatible endpoint changes where models and completions come
+   from (`vm.setEndpoint`).
+
+Error handling maps HTTP status codes (401 / 402 / 404 / 408 / 429 / 5xx) to actionable messages. Conversation
+persistence (`<id>.chat.json`) and the existing Stop (`stopGeneration()`) path are retained; both cover the
+Phase 5 deliverable of cancellation and persistence.

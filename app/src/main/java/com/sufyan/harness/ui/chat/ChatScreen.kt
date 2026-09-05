@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.sufyan.harness.AgentPhase
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.UiMessage
+import com.sufyan.harness.ai.ModelInfo
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.Radius
 import com.sufyan.harness.ui.theme.Spacing
@@ -44,6 +45,7 @@ fun ChatScreen(
     val generating by vm.generating.collectAsState()
     val phase by vm.agentPhase.collectAsState()
     val status by vm.agentStatus.collectAsState()
+    val models by vm.models.collectAsState()
     var input by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
     var showAttach by remember { mutableStateOf(false) }
@@ -126,6 +128,7 @@ fun ChatScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
                         MessageTurn(
                             msg = msg,
+                            usageLine = usageText(msg, models, project?.modelId ?: vm.settings.modelId),
                             expanded = expanded,
                             onToggleActivity = {
                                 openActivity = if (msg.timestamp in openActivity) openActivity - msg.timestamp
@@ -193,6 +196,20 @@ fun ChatScreen(
     }
 }
 
+/** §50 — compact usage line: real tokens, and an approximate cost only when the model's pricing is known. */
+private fun usageText(msg: UiMessage, models: List<ModelInfo>, model: String): String? {
+    val u = msg.usage ?: return null
+    if (u.isEmpty) return null
+    val pricing = models.firstOrNull { it.id == model }
+    val cost = if (pricing != null && (pricing.promptPrice != null || pricing.completionPrice != null)) {
+        (u.promptTokens * (pricing.promptPrice ?: 0.0) + u.completionTokens * (pricing.completionPrice ?: 0.0))
+    } else null
+    return buildString {
+        append("${model.substringAfterLast('/')} · ${u.totalTokens} tokens (${u.promptTokens} in / ${u.completionTokens} out)")
+        cost?.let { append(" · ~$${"%.4f".format(it)}") }
+    }
+}
+
 @Composable
 private fun SuggestionChip(text: String, onClick: () -> Unit) {
     Row(
@@ -213,6 +230,7 @@ private fun SuggestionChip(text: String, onClick: () -> Unit) {
 @Composable
 private fun MessageTurn(
     msg: UiMessage,
+    usageLine: String?,
     expanded: Boolean,
     onToggleActivity: () -> Unit,
     onCopy: () -> Unit,
@@ -257,6 +275,7 @@ private fun MessageTurn(
                     onReviewChanges = onReviewChanges.takeIf { msg.tools.any { it.done && it.name in setOf("write_file", "edit_file", "delete_file") } },
                     onOpenPreview = onOpenPreview.takeIf { msg.tools.any { it.done && it.ok && it.name == "run_command" } || msg.tools.any { it.name == "write_file" } },
                     onCopy = onCopy,
+                    usageLine = usageLine,
                 )
             }
         }

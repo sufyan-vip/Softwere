@@ -2,6 +2,7 @@ package com.sufyan.harness.ai
 
 import com.sufyan.harness.data.SecureStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -16,16 +17,25 @@ import java.util.concurrent.TimeUnit
 
 class OpenRouterProvider(
     private val secure: SecureStore,
-    private val endpoint: String = DEFAULT_ENDPOINT,
+    endpoint: String = DEFAULT_ENDPOINT,
 ) : AiProvider {
 
     companion object {
         const val DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1"
         private const val REFERER = "https://github.com/sufyan-vip/Softwere"
         private const val TITLE = "Sufyan Harness"
+        private const val MODEL_CACHE_TTL_MS = 10 * 60 * 1000L
+        private const val MAX_RETRIES = 3
     }
 
     override val displayName = "OpenRouter"
+
+    /** Mutable so the user can point at a compatible endpoint (Phase 5) without recreating the app graph. */
+    var endpointValue: String = endpoint
+    private fun endpoint(): String = endpointValue.ifBlank { DEFAULT_ENDPOINT }
+
+    private var modelsCache: List<ModelInfo>? = null
+    private var modelsCacheAt: Long = 0
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -48,7 +58,7 @@ class OpenRouterProvider(
     suspend fun testConnection(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val key = requireKey()
-            val req = Request.Builder().url("$endpoint/auth/key").auth(key).get().build()
+            val req = Request.Builder().url("${endpoint()}/auth/key").auth(key).get().build()
             client.newCall(req).execute().use { res ->
                 when {
                     res.code == 401 -> throw IOException("Key rejected (401). Check the key is correct and active.")
@@ -67,14 +77,20 @@ class OpenRouterProvider(
         }
     }
 
-    override suspend fun listModels(): Result<List<ModelInfo>> = withContext(Dispatchers.IO) {
+    override suspend fun listModels(force: Boolean): Result<List<ModelInfo>> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!force) {
+            modelsCache?.let { cached ->
+                if (now - modelsCacheAt < MODEL_CACHE_TTL_MS) return@withContext Result.success(cached)
+            }
+        }
         runCatching {
-            val req = Request.Builder().url("$endpoint/models").get()
+            val req = Request.Builder().url("${endpoint()}/models").get()
                 .header("HTTP-Referer", REFERER).header("X-Title", TITLE).build()
             client.newCall(req).execute().use { res ->
                 if (!res.isSuccessful) throw IOException("Could not load models (HTTP ${res.code}).")
                 val arr = json.parseToJsonElement(res.body!!.string()).jsonObject["data"]!!.jsonArray
-                arr.mapNotNull { el ->
+                val models = arr.mapNotNull { el ->
                     runCatching {
                         val o = el.jsonObject
                         val pricing = o["pricing"]?.jsonObject
@@ -87,6 +103,9 @@ class OpenRouterProvider(
                         )
                     }.getOrNull()
                 }.sortedBy { it.id }
+                modelsCache = models
+                modelsCacheAt = now
+                models
             }
         }
     }
@@ -155,77 +174,114 @@ class OpenRouterProvider(
             return@flow
         }
 
-        val request = Request.Builder()
-            .url("$endpoint/chat/completions")
-            .auth(key)
-            .post(buildBody(model, messages, tools, temperature).toRequestBody("application/json".toMediaType()))
-            .build()
+        var attempt = 0
+        while (attempt < MAX_RETRIES) {
+            attempt++
+            val request = Request.Builder()
+                .url("${endpoint()}/chat/completions")
+                .auth(key)
+                .post(buildBody(model, messages, tools, temperature).toRequestBody("application/json".toMediaType()))
+                .build()
 
-        val call = client.newCall(request)
-        try {
-            call.execute().use { res ->
-                if (!res.isSuccessful) {
-                    emit(StreamEvent.Failed(httpError(res.code, res.body?.string().orEmpty())))
-                    emit(StreamEvent.Done)
-                    return@use
-                }
-                val source = res.body?.source()
-                if (source == null) {
-                    emit(StreamEvent.Failed(AiError("Empty response", "OpenRouter returned no response body.", true)))
-                    emit(StreamEvent.Done)
-                    return@use
-                }
+            var retryAfterMs: Long? = null
+            try {
+                client.newCall(request).execute().use { res ->
+                    // §5 — rate limit / server errors are retried with backoff (429 uses Retry-After).
+                    if ((res.code == 429 || res.code in 500..599) && attempt < MAX_RETRIES) {
+                        retryAfterMs = res.header("Retry-After")?.toLongOrNull()?.times(1000)
+                            ?: (1000L * attempt)
+                        return@use
+                    }
+                    if (!res.isSuccessful) {
+                        emit(StreamEvent.Failed(httpError(res.code, res.body?.string().orEmpty())))
+                        emit(StreamEvent.Done)
+                        return@use
+                    }
+                    val source = res.body?.source()
+                    if (source == null) {
+                        emit(StreamEvent.Failed(AiError("Empty response", "OpenRouter returned no response body.", true)))
+                        emit(StreamEvent.Done)
+                        return@use
+                    }
 
-                // tool call fragments accumulate by index across deltas
-                val toolNames = mutableMapOf<Int, String>()
-                val toolIds = mutableMapOf<Int, String>()
-                val toolArgs = mutableMapOf<Int, StringBuilder>()
+                    // tool call fragments accumulate by index across deltas
+                    val toolNames = mutableMapOf<Int, String>()
+                    val toolIds = mutableMapOf<Int, String>()
+                    val toolArgs = mutableMapOf<Int, StringBuilder>()
+                    var lastUsage: Usage? = null
 
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val payload = line.removePrefix("data:").trim()
-                    if (payload.isEmpty()) continue
-                    if (payload == "[DONE]") break
+                    while (!source.exhausted()) {
+                        val line = source.readUtf8Line() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val payload = line.removePrefix("data:").trim()
+                        if (payload.isEmpty()) continue
+                        if (payload == "[DONE]") break
 
-                    val delta = runCatching {
-                        json.parseToJsonElement(payload).jsonObject["choices"]
-                            ?.jsonArray?.firstOrNull()?.jsonObject?.get("delta")?.jsonObject
-                    }.getOrNull() ?: continue
+                        // §50 — real usage may be reported on the final chunk.
+                        runCatching {
+                            json.parseToJsonElement(payload).jsonObject["usage"]?.jsonObject?.let { u ->
+                                lastUsage = Usage(
+                                    promptTokens = u["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                                    completionTokens = u["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                                    totalTokens = u["total_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                                )
+                            }
+                        }
 
-                    delta["content"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { it.isNotEmpty() }
-                        ?.let { emit(StreamEvent.Text(it)) }
+                        val delta = runCatching {
+                            json.parseToJsonElement(payload).jsonObject["choices"]
+                                ?.jsonArray?.firstOrNull()?.jsonObject?.get("delta")?.jsonObject
+                        }.getOrNull() ?: continue
 
-                    delta["tool_calls"]?.jsonArray?.forEach { tcEl ->
-                        val tc = tcEl.jsonObject
-                        val idx = tc["index"]?.jsonPrimitive?.intOrNull ?: 0
-                        tc["id"]?.jsonPrimitive?.contentOrNull?.let { toolIds[idx] = it }
-                        tc["function"]?.jsonObject?.let { fn ->
-                            fn["name"]?.jsonPrimitive?.contentOrNull?.let { toolNames[idx] = it }
-                            fn["arguments"]?.jsonPrimitive?.contentOrNull?.let {
-                                toolArgs.getOrPut(idx) { StringBuilder() }.append(it)
+                        delta["content"]?.jsonPrimitive?.contentOrNull
+                            ?.takeIf { it.isNotEmpty() }
+                            ?.let { emit(StreamEvent.Text(it)) }
+
+                        delta["tool_calls"]?.jsonArray?.forEach { tcEl ->
+                            val tc = tcEl.jsonObject
+                            val idx = tc["index"]?.jsonPrimitive?.intOrNull ?: 0
+                            tc["id"]?.jsonPrimitive?.contentOrNull?.let { toolIds[idx] = it }
+                            tc["function"]?.jsonObject?.let { fn ->
+                                fn["name"]?.jsonPrimitive?.contentOrNull?.let { toolNames[idx] = it }
+                                fn["arguments"]?.jsonPrimitive?.contentOrNull?.let {
+                                    toolArgs.getOrPut(idx) { StringBuilder() }.append(it)
+                                }
                             }
                         }
                     }
-                }
 
-                if (toolNames.isNotEmpty()) {
-                    val calls = toolNames.keys.sorted().map { i ->
-                        ToolCall(
-                            id = toolIds[i] ?: "call_$i",
-                            name = toolNames[i]!!,
-                            argumentsJson = toolArgs[i]?.toString().orEmpty().ifBlank { "{}" },
-                        )
+                    if (toolNames.isNotEmpty()) {
+                        val calls = toolNames.keys.sorted().map { i ->
+                            ToolCall(
+                                id = toolIds[i] ?: "call_$i",
+                                name = toolNames[i]!!,
+                                argumentsJson = toolArgs[i]?.toString().orEmpty().ifBlank { "{}" },
+                            )
+                        }
+                        emit(StreamEvent.Tools(calls))
                     }
-                    emit(StreamEvent.Tools(calls))
+                    lastUsage?.takeIf { !it.isEmpty }?.let { emit(StreamEvent.Usage(it)) }
+                    emit(StreamEvent.Done)
                 }
-                emit(StreamEvent.Done)
+            } catch (e: IOException) {
+                if (attempt < MAX_RETRIES) {
+                    retryAfterMs = 1000L * attempt
+                } else {
+                    emit(StreamEvent.Failed(networkError(e)))
+                    emit(StreamEvent.Done)
+                    return@flow
+                }
             }
-        } catch (e: IOException) {
-            emit(StreamEvent.Failed(networkError(e)))
-            emit(StreamEvent.Done)
+
+            if (retryAfterMs != null) {
+                delay(retryAfterMs)
+                continue
+            }
+            return@flow
         }
+
+        emit(StreamEvent.Failed(AiError("Rate limited", "The request was repeatedly rate-limited. Wait a few seconds and retry.", true)))
+        emit(StreamEvent.Done)
     }.flowOn(Dispatchers.IO)
 
     private fun httpError(code: Int, body: String): AiError {

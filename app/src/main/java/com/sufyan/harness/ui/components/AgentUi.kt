@@ -259,6 +259,7 @@ fun FinalAnswerCard(
     onOpenPreview: (() -> Unit)?,
     onCopy: () -> Unit,
     modifier: Modifier = Modifier,
+    usageLine: String? = null,
 ) {
     Column(modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -274,6 +275,14 @@ fun FinalAnswerCard(
         }
         Spacer(Modifier.height(Spacing.xs))
         AssistantRichText(text)
+        if (usageLine != null) {
+            Spacer(Modifier.height(Spacing.sm))
+            Text(
+                usageLine,
+                style = MonoStyle.copy(fontSize = 11.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (changedFiles.isNotEmpty()) {
             Spacer(Modifier.height(Spacing.md))
             Text(
