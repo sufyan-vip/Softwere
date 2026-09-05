@@ -28,6 +28,7 @@ import com.sufyan.harness.ui.theme.HarnessColors
 import com.sufyan.harness.ui.theme.MonoStyle
 import com.sufyan.harness.ui.theme.Radius
 import com.sufyan.harness.ui.theme.Spacing
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,6 +41,8 @@ fun ChatScreen(vm: HarnessViewModel, onPickModel: () -> Unit) {
     var showAttach by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
+    // Clipboard.setText is a suspend call, so the copy action needs a coroutine scope.
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(messages.size, generating) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
@@ -99,7 +102,11 @@ fun ChatScreen(vm: HarnessViewModel, onPickModel: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(Spacing.lg),
             ) {
                 items(messages) { msg ->
-                    MessageBubble(msg, onCopy = { clipboard.setText(AnnotatedString(msg.text)) }, onRetry = { vm.retryLast() })
+                    MessageBubble(
+                        msg,
+                        onCopy = { scope.launch { clipboard.setText(AnnotatedString(msg.text)) } },
+                        onRetry = { vm.retryLast() },
+                    )
                 }
                 if (generating) {
                     item {
