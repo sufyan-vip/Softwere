@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.flow
 sealed interface AgentEvent {
     data class Status(val text: String) : AgentEvent
     data class TextDelta(val delta: String) : AgentEvent
-    data class ToolStarted(val id: String, val name: String, val summary: String) : AgentEvent
+    data class ToolStarted(val id: String, val name: String, val summary: String, val target: String) : AgentEvent
     data class ToolFinished(val id: String, val ok: Boolean, val summary: String, val detail: String) : AgentEvent
     data class Failed(val error: AiError) : AgentEvent
     data object TurnFinished : AgentEvent
@@ -78,7 +78,7 @@ class Agent(
             emit(AgentEvent.Status(statusFor(pendingTools)))
 
             for (call in pendingTools) {
-                emit(AgentEvent.ToolStarted(call.id, call.name, describe(call)))
+                emit(AgentEvent.ToolStarted(call.id, call.name, describe(call), targetOf(call)))
                 val result = tools.execute(call)
                 emit(AgentEvent.ToolFinished(call.id, result.ok, result.summary, result.payload.take(4000)))
                 history += ChatMessage(
@@ -102,9 +102,18 @@ class Agent(
         emit(AgentEvent.TurnFinished)
     }
 
+    private val pathArg = Regex("\"path\"\\s*:\\s*\"([^\"]+)\"")
+    private val commandArg = Regex("\"command\"\\s*:\\s*\"([^\"]+)\"")
+
+    /** The concrete thing a tool call is about — a path or a command. Used for the activity timeline. */
+    private fun targetOf(call: ToolCall): String = when (call.name) {
+        "run_command" -> commandArg.find(call.argumentsJson)?.groupValues?.get(1).orEmpty()
+        else -> pathArg.find(call.argumentsJson)?.groupValues?.get(1).orEmpty()
+    }
+
     private fun describe(call: ToolCall): String {
-        val path = Regex("\"path\"\\s*:\\s*\"([^\"]+)\"").find(call.argumentsJson)?.groupValues?.get(1)
-        val cmd = Regex("\"command\"\\s*:\\s*\"([^\"]+)\"").find(call.argumentsJson)?.groupValues?.get(1)
+        val path = pathArg.find(call.argumentsJson)?.groupValues?.get(1)
+        val cmd = commandArg.find(call.argumentsJson)?.groupValues?.get(1)
         return when (call.name) {
             "list_files" -> "Inspecting project..."
             "read_file" -> "Reading ${path ?: "file"}..."

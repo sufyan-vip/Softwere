@@ -5,6 +5,38 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 
+/**
+ * §11 of the V3 spec — what the user said they are building. This is stored in the project
+ * index (Project.type) rather than being guessed from the file list, so the rest of the app
+ * (preview, build, agent prompts) can behave differently per type.
+ */
+enum class ProjectType(
+    val id: String,
+    val label: String,
+    val blurb: String,
+    val template: Template,
+    /** False when the pipeline this type needs is not implemented yet (see docs/V3-PROGRESS.md). */
+    val canCreate: Boolean = true,
+    val languages: String = "",
+) {
+    AndroidApp("ANDROID_APP", "Android App", "APK / mobile app", Template.Empty, false, "Kotlin • Gradle"),
+    Website("WEBSITE", "Website", "HTML / CSS / JS", Template.Web, languages = "HTML • CSS • JS"),
+    WebApp("WEB_APP", "Web App", "React / Vite / Node", Template.React, languages = "JSX • Vite • Node"),
+    Node("NODE", "Node.js", "Backend / CLI", Template.Node, languages = "JavaScript • Node"),
+    Empty("EMPTY", "Empty Project", "Start from scratch", Template.Empty, languages = "Any");
+
+    companion object {
+        /** Older projects only recorded a template, so fall back to that instead of showing "unknown". */
+        fun from(id: String?, template: String?): ProjectType =
+            entries.firstOrNull { it.id == id } ?: when (template) {
+                "web" -> ProjectType.Website
+                "node" -> ProjectType.Node
+                "react" -> ProjectType.WebApp
+                else -> ProjectType.Empty
+            }
+    }
+}
+
 @Serializable
 data class Project(
     val id: String,
@@ -14,7 +46,11 @@ data class Project(
     var updatedAt: Long,
     var modelId: String? = null,
     var previewPort: Int = 5173,
-)
+    var type: String = "",
+) {
+    /** Derived, so it is never trusted from disk: [type] may be missing on older projects. */
+    val kind: ProjectType get() = ProjectType.from(type, template)
+}
 
 @Serializable
 private data class ProjectIndex(val projects: List<Project> = emptyList())
@@ -51,7 +87,7 @@ class Workspace(private val context: Context) {
         indexFile.writeText(json.encodeToString(ProjectIndex.serializer(), ProjectIndex(projects)))
     }
 
-    fun create(name: String, template: Template): Result<Project> = runCatching {
+    fun create(name: String, template: Template, type: ProjectType = ProjectType.from(null, template.id)): Result<Project> = runCatching {
         val clean = name.trim()
         require(clean.isNotEmpty()) { "Project name cannot be empty." }
         require(list().none { it.name.equals(clean, ignoreCase = true) }) { "A project named \"$clean\" already exists." }
@@ -60,7 +96,7 @@ class Workspace(private val context: Context) {
         val dir = File(root, id)
         check(dir.mkdirs()) { "Could not create project directory." }
         val now = System.currentTimeMillis()
-        val project = Project(id, clean, template.id, now, now)
+        val project = Project(id, clean, template.id, now, now, type = type.id)
         scaffold(dir, clean, template)
         save(list() + project)
         project

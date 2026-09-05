@@ -1,6 +1,5 @@
 package com.sufyan.harness.ui.chat
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,25 +19,35 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import com.sufyan.harness.AgentPhase
 import com.sufyan.harness.HarnessViewModel
-import com.sufyan.harness.ToolActivity
 import com.sufyan.harness.UiMessage
 import com.sufyan.harness.ui.components.*
-import com.sufyan.harness.ui.theme.HarnessColors
-import com.sufyan.harness.ui.theme.MonoStyle
 import com.sufyan.harness.ui.theme.Radius
 import com.sufyan.harness.ui.theme.Spacing
 import kotlinx.coroutines.launch
 
+/**
+ * The agent workspace (V3 §13-§17). Three layers, top to bottom:
+ * the conversation, each turn's collapsible agent activity, and the final answer with what changed.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(vm: HarnessViewModel, onPickModel: () -> Unit) {
+fun ChatScreen(
+    vm: HarnessViewModel,
+    onPickModel: () -> Unit,
+    onReviewChanges: () -> Unit = {},
+    onOpenPreview: () -> Unit = {},
+) {
     val project by vm.active.collectAsState()
     val messages by vm.messages.collectAsState()
     val generating by vm.generating.collectAsState()
+    val phase by vm.agentPhase.collectAsState()
+    val status by vm.agentStatus.collectAsState()
     var input by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
     var showAttach by remember { mutableStateOf(false) }
+    var openActivity by remember { mutableStateOf(setOf<Long>()) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     // Clipboard.setText is a suspend call, so the copy action needs a coroutine scope.
@@ -49,11 +58,12 @@ fun ChatScreen(vm: HarnessViewModel, onPickModel: () -> Unit) {
     }
 
     val model = project?.modelId ?: vm.settings.modelId
+    val previewRunning = vm.devServer?.state?.value?.running == true
 
     Column(Modifier.fillMaxSize().imePadding()) {
         AppTopBar(
             title = project?.name ?: "AI Chat",
-            subtitle = model.substringAfterLast('/'),
+            subtitle = "${model.substringAfterLast('/')} · ${if (project != null) "ready" else "no project"}",
             actions = {
                 TextButton(onClick = onPickModel) {
                     Text(model.substringAfterLast('/').take(16), style = MaterialTheme.typography.labelSmall)
@@ -102,22 +112,37 @@ fun ChatScreen(vm: HarnessViewModel, onPickModel: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(Spacing.lg),
             ) {
                 items(messages) { msg ->
-                    MessageBubble(
-                        msg,
-                        onCopy = { scope.launch { clipboard.setText(AnnotatedString(msg.text)) } },
-                        onRetry = { vm.retryLast() },
-                    )
-                }
-                if (generating) {
-                    item {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                            Text("Working...", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val isLast = msg.timestamp == messages.last().timestamp
+                    val expanded = generating && isLast || msg.timestamp in openActivity
+                    Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                        MessageTurn(
+                            msg = msg,
+                            expanded = expanded,
+                            onToggleActivity = {
+                                openActivity = if (msg.timestamp in openActivity) openActivity - msg.timestamp
+                                else openActivity + msg.timestamp
+                            },
+                            onCopy = { scope.launch { clipboard.setText(AnnotatedString(msg.text)) } },
+                            onRetry = { vm.retryLast() },
+                            onRerun = { vm.runCommand(it) },
+                            onReviewChanges = onReviewChanges,
+                            onOpenPreview = onOpenPreview,
+                        )
+                        if (msg.role == "assistant" && msg.tools.isNotEmpty() && !(generating && isLast)) {
+                            SessionSummaryCard(
+                                summarizeTurn(msg, previewRunning),
+                                onReviewDiff = onReviewChanges,
+                                onOpenPreview = onOpenPreview,
+                                onContinue = { vm.send("Continue from where you stopped. Verify with a build or a test run first.") },
+                                enabled = !generating,
+                            )
                         }
                     }
                 }
             }
         }
+
+        AgentStateBar(phase, status, onStop = { vm.stopGeneration() }, modifier = Modifier.padding(bottom = Spacing.sm))
 
         Composer(
             value = input,
@@ -177,7 +202,16 @@ private fun SuggestionChip(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun MessageBubble(msg: UiMessage, onCopy: () -> Unit, onRetry: () -> Unit) {
+private fun MessageTurn(
+    msg: UiMessage,
+    expanded: Boolean,
+    onToggleActivity: () -> Unit,
+    onCopy: () -> Unit,
+    onRetry: () -> Unit,
+    onRerun: (String) -> Unit,
+    onReviewChanges: () -> Unit,
+    onOpenPreview: () -> Unit,
+) {
     when (msg.role) {
         "user" -> Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             Text("You", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -198,66 +232,23 @@ private fun MessageBubble(msg: UiMessage, onCopy: () -> Unit, onRetry: () -> Uni
                 Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(Spacing.xs))
                 Text("Sufyan Harness AI", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.weight(1f))
-                if (msg.text.isNotBlank()) {
-                    IconButton(onClick = onCopy, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy reply", modifier = Modifier.size(14.dp))
-                    }
-                }
             }
-            Spacer(Modifier.height(Spacing.xs))
-            msg.tools.forEach { ToolCallCard(it) ; Spacer(Modifier.height(Spacing.sm)) }
-            if (msg.text.isNotBlank()) RichText(msg.text)
-        }
-    }
-}
-
-@Composable
-private fun ToolCallCard(tool: ToolActivity) {
-    var expanded by remember { mutableStateOf(false) }
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Radius.md))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(Radius.md))
-            .clickable { expanded = !expanded }
-            .padding(Spacing.md),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(Spacing.sm))
-            Text(tool.name, style = MaterialTheme.typography.labelLarge)
-            Spacer(Modifier.weight(1f))
-            when {
-                !tool.done -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                tool.ok -> Icon(Icons.Default.CheckCircle, contentDescription = "Completed", tint = HarnessColors.Ok, modifier = Modifier.size(14.dp))
-                else -> Icon(Icons.Default.Cancel, contentDescription = "Failed", tint = HarnessColors.Danger, modifier = Modifier.size(14.dp))
+            if (msg.tools.isNotEmpty()) {
+                ActivityTimeline(
+                    tools = msg.tools,
+                    expanded = expanded,
+                    onToggle = onToggleActivity,
+                    onRerun = onRerun,
+                )
             }
-        }
-        Spacer(Modifier.height(Spacing.xs))
-        Text(tool.summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        AnimatedVisibility(expanded && tool.detail.isNotBlank()) {
-            Column {
-                Spacer(Modifier.height(Spacing.sm))
-                CodeBlock(tool.detail.take(2000))
-            }
-        }
-    }
-}
-
-/** Renders assistant text, splitting fenced code blocks into CodeBlock components. */
-@Composable
-private fun RichText(text: String) {
-    val parts = remember(text) { text.split("```") }
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-        parts.forEachIndexed { i, part ->
-            if (i % 2 == 0) {
-                if (part.isNotBlank()) Text(part.trim(), style = MaterialTheme.typography.bodyMedium)
-            } else {
-                val lang = part.lineSequence().firstOrNull()?.trim().orEmpty()
-                val body = if (lang.isNotEmpty() && !lang.contains(' ')) part.substringAfter('\n') else part
-                CodeBlock(body.trimEnd(), lang.takeIf { it.isNotEmpty() && !it.contains(' ') })
+            if (msg.text.isNotBlank()) {
+                FinalAnswerCard(
+                    text = msg.text,
+                    changedFiles = changedFilesOf(msg),
+                    onReviewChanges = onReviewChanges.takeIf { msg.tools.any { it.done && it.name in setOf("write_file", "edit_file", "delete_file") } },
+                    onOpenPreview = onOpenPreview.takeIf { msg.tools.any { it.done && it.ok && it.name == "run_command" } || msg.tools.any { it.name == "write_file" } },
+                    onCopy = onCopy,
+                )
             }
         }
     }
