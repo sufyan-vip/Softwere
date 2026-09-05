@@ -42,7 +42,7 @@ object ProjectArchive {
         destDir.mkdirs()
         val entries = readEntries(zipFile)
 
-        val relPaths = entries.filter { it.isFile }.map { safeRel(it) }
+        val relPaths = entries.filter { !it.isDirectory }.map { safeRel(it.name) }
         val commonRoot = commonPrefix(relPaths)
 
         ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zin ->

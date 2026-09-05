@@ -136,6 +136,7 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                         vm,
                         onPreview = { nav.navigate(Routes.PREVIEW) },
                         onGit = { nav.navigate(Routes.GIT) },
+                        onChat = { nav.navigate(Routes.CHAT) },
                     )
                 }
                 composable(Routes.SETTINGS) {

@@ -57,6 +57,15 @@ fun ChatScreen(
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
 
+    // §4 — an editor "AI action" can pre-fill the composer via a pending prompt.
+    val pendingPrompt by vm.pendingPrompt.collectAsState()
+    LaunchedEffect(pendingPrompt, project?.id) {
+        if (pendingPrompt != null) {
+            input = pendingPrompt!!
+            vm.consumePendingPrompt()
+        }
+    }
+
     val model = project?.modelId ?: vm.settings.modelId
     val previewRunning = vm.devServer?.state?.value?.running == true
 

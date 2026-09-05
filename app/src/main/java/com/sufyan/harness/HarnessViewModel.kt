@@ -90,8 +90,29 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     private val _toast = MutableStateFlow<String?>(null)
     val toast = _toast.asStateFlow()
 
+    /** Pre-filled prompt that the next visit to the chat consumes (editor AI actions, §4). */
+    private val _pendingPrompt = MutableStateFlow<String?>(null)
+    val pendingPrompt = _pendingPrompt.asStateFlow()
+
     fun notify(msg: String) { _toast.value = msg }
     fun clearToast() { _toast.value = null }
+
+    fun setPendingPrompt(text: String) { _pendingPrompt.value = text }
+    fun consumePendingPrompt(): String? = _pendingPrompt.value.also { _pendingPrompt.value = null }
+
+    // undo history for editor tabs: path -> stack of previous contents (cap 50)
+    private val undoStacks = mutableMapOf<String, MutableList<String>>()
+
+    fun undoTab(path: String) {
+        val tab = _tabs.value.find { it.path == path } ?: return
+        val stack = undoStacks[path] ?: return
+        if (stack.isEmpty()) return
+        val prev = stack.removeAt(stack.lastIndex)
+        _tabs.value = _tabs.value.map { if (it.path == path) it.copy(content = prev, dirty = true) else it }
+        notify("Undid last edit in $path")
+    }
+
+    fun canUndo(path: String): Boolean = (undoStacks[path]?.isNotEmpty()) == true
 
     val projectDir: File? get() = _active.value?.let { workspace.projectDir(it) }
     val files: ProjectFiles? get() = projectDir?.let { ProjectFiles(it) }
@@ -218,6 +239,15 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateTab(path: String, content: String) {
+        val current = _tabs.value.find { it.path == path }
+        // Push the previous content onto the undo stack once per real change, so a keystroke can be
+        // undone (capped at 50 steps). No-op when the value did not actually change.
+        if (current != null && current.content != content) {
+            undoStacks.getOrPut(path) { mutableListOf() }.apply {
+                add(current.content)
+                if (size > 50) removeAt(0)
+            }
+        }
         _tabs.value = _tabs.value.map { if (it.path == path) it.copy(content = content, dirty = true) else it }
     }
 
