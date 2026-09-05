@@ -1,0 +1,79 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.7
+
+      - name: Lint
+        run: ./gradlew lintDebug --stacktrace
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Assemble release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Verify APKs
+        run: |
+          set -e
+          echo "--- Generated APKs ---"
+          find app/build/outputs/apk -name '*.apk' -print -exec ls -lh {} \;
+          for apk in $(find app/build/outputs/apk -name '*.apk'); do
+            test -s "$apk" || { echo "FAIL: $apk is empty"; exit 1; }
+            unzip -l "$apk" | grep -q AndroidManifest.xml || { echo "FAIL: $apk has no manifest"; exit 1; }
+            unzip -l "$apk" | grep -q classes.dex || { echo "FAIL: $apk has no dex"; exit 1; }
+            echo "PASS: $apk is a valid Android package"
+          done
+          "$ANDROID_HOME"/build-tools/*/aapt2 dump badging \
+            app/build/outputs/apk/release/app-release.apk | head -5 || true
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sufyan-harness-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sufyan-harness-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            app/build/reports/**
