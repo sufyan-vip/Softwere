@@ -29,6 +29,7 @@ import com.sufyan.harness.ui.projects.ProjectDetailScreen
 import com.sufyan.harness.ui.projects.ProjectsScreen
 import com.sufyan.harness.ui.settings.SettingsScreen
 import com.sufyan.harness.ui.settings.ToolchainScreen
+import com.sufyan.harness.ui.settings.StorageScreen
 import com.sufyan.harness.ui.terminal.TerminalScreen
 import com.sufyan.harness.ui.theme.ThemeMode
 
@@ -45,6 +46,7 @@ object Routes {
     const val TOOLCHAINS = "toolchains"
     const val PROJECT_SETTINGS = "project_settings"
     const val PROJECT_DETAIL = "project_detail"
+    const val STORAGE = "storage"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector, val selected: ImageVector)
@@ -134,6 +136,7 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                         vm,
                         onPreview = { nav.navigate(Routes.PREVIEW) },
                         onGit = { nav.navigate(Routes.GIT) },
+                        onChat = { nav.navigate(Routes.CHAT) },
                     )
                 }
                 composable(Routes.SETTINGS) {
@@ -142,6 +145,7 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                         onThemeChanged = onThemeChanged,
                         onModels = { nav.navigate(Routes.MODELS) },
                         onToolchains = { nav.navigate(Routes.TOOLCHAINS) },
+                        onStorage = { nav.navigate(Routes.STORAGE) },
                     )
                 }
                 composable(Routes.NEW_PROJECT) {
@@ -153,6 +157,7 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                 composable(Routes.PREVIEW) { PreviewScreen(vm, onBack = { nav.popBackStack() }) }
                 composable(Routes.GIT) { GitScreen(vm, onBack = { nav.popBackStack() }) }
                 composable(Routes.TOOLCHAINS) { ToolchainScreen(vm, onBack = { nav.popBackStack() }) }
+                composable(Routes.STORAGE) { StorageScreen(vm, onBack = { nav.popBackStack() }) }
                 composable(Routes.PROJECT_SETTINGS) { ProjectSettingsScreen(vm, onBack = { nav.popBackStack() }) }
                 composable(Routes.PROJECT_DETAIL) {
                     val active by vm.active.collectAsState()

@@ -1,5 +1,7 @@
 package com.sufyan.harness.ui.projects
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,10 +43,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.data.ProjectType
+import com.sufyan.harness.runtime.Toolchains
 import com.sufyan.harness.ui.components.AppTopBar
 import com.sufyan.harness.ui.components.ErrorState
 import com.sufyan.harness.ui.components.HarnessCard
 import com.sufyan.harness.ui.components.PrimaryButton
+import com.sufyan.harness.ui.components.SecondaryButton
 import com.sufyan.harness.ui.components.SectionHeader
 import com.sufyan.harness.ui.components.SettingRow
 import com.sufyan.harness.ui.components.StatusChip
@@ -66,6 +71,27 @@ fun NewProjectScreen(vm: HarnessViewModel, onDone: () -> Unit) {
     var initGit by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf(false) }
+
+    // §41 — import a real project zip as a new project (SAF content Uri, read through the resolver).
+    val zipLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val chosen = type ?: ProjectType.Empty
+        val projectName = name.trim().ifEmpty { "Imported ${System.currentTimeMillis()}" }
+        importing = true
+        error = null
+        vm.importProjectFromUri(projectName, chosen, uri).fold(
+            { project ->
+                importing = false
+                vm.notify("Imported ${project.name} from ZIP")
+                onDone()
+            },
+            { failure ->
+                importing = false
+                error = failure.message ?: "The ZIP could not be imported."
+            },
+        )
+    }
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar("Create New Project", subtitle = "What are you building?", onBack = onDone)
@@ -114,7 +140,21 @@ fun NewProjectScreen(vm: HarnessViewModel, onDone: () -> Unit) {
                             subtitle = chosen.languages,
                             icon = null,
                         )
-                        SettingRow("Runtime", subtitle = if (chosen == ProjectType.Node || chosen == ProjectType.WebApp) "Node — install from Toolchains" else "None needed", icon = null)
+                        SettingRow(
+                            "Runtime",
+                            subtitle = if (chosen.requiredTools.isEmpty()) "None needed" else chosen.requiredTools.joinToString(", ") { Toolchains.labelFor(it) },
+                            icon = null,
+                        )
+                        SettingRow(
+                            "Preview",
+                            subtitle = "port ${chosen.defaultPort} • ${chosen.devCommand ?: "built-in static server"}",
+                            icon = null,
+                        )
+                        SettingRow(
+                            "Build",
+                            subtitle = chosen.buildCommand ?: "no build step (source IS the project)",
+                            icon = null,
+                        )
                         SettingRow(
                             "Initialise a git repository",
                             subtitle = "Runs a real git init in the project directory",
@@ -179,8 +219,16 @@ fun NewProjectScreen(vm: HarnessViewModel, onDone: () -> Unit) {
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = name.isNotBlank() && type != null && !creating,
+                    enabled = name.isNotBlank() && type != null && !creating && !importing,
                     icon = Icons.Default.Add,
+                )
+                Spacer(Modifier.height(Spacing.sm))
+                SecondaryButton(
+                    if (importing) "Importing..." else "Import project from ZIP",
+                    { zipLauncher.launch("application/zip") },
+                    Modifier.fillMaxWidth(),
+                    enabled = !creating && !importing,
+                    icon = Icons.Default.FolderOpen,
                 )
             }
         }

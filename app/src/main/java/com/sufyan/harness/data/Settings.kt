@@ -17,6 +17,11 @@ class Settings(context: Context) {
         get() = prefs.getString(MODEL, "openai/gpt-4o-mini")!!
         set(v) = prefs.edit().putString(MODEL, v).apply()
 
+    /** §5 — custom OpenRouter-compatible endpoint (blank = the default). */
+    var endpoint: String
+        get() = prefs.getString(ENDPOINT, "")!!
+        set(v) = prefs.edit().putString(ENDPOINT, v.trim()).apply()
+
     var systemPrompt: String
         get() = prefs.getString(SYS_PROMPT, "")!!
         set(v) = prefs.edit().putString(SYS_PROMPT, v).apply()
@@ -64,6 +69,7 @@ class Settings(context: Context) {
     private companion object {
         const val THEME = "theme_mode"
         const val MODEL = "model_id"
+        const val ENDPOINT = "endpoint"
         const val SYS_PROMPT = "system_prompt"
         const val TEMP = "temperature"
         const val EDITOR_FONT = "editor_font"

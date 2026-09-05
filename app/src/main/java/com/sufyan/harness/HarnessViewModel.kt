@@ -1,6 +1,7 @@
 package com.sufyan.harness
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sufyan.harness.ai.*
@@ -52,10 +53,19 @@ data class UiMessage(
     val role: String,          // "user" | "assistant" | "error" | "status"
     var text: String,
     var tools: List<ToolActivity> = emptyList(),
+    var usage: Usage? = null,  // §50 — only set when the provider reports real token usage
     val timestamp: Long = System.currentTimeMillis(),
 )
 
 data class OpenTab(val path: String, var content: String, var dirty: Boolean = false)
+
+/** §52 — one snapshot of storage, computed from real directories, never estimated. */
+data class StorageSnapshot(
+    val projectsTotal: Long,
+    val runtimeSize: Long,
+    val exportsSize: Long,
+    val projects: List<Pair<String, Long>>,
+)
 
 class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -81,14 +91,36 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     private val _toast = MutableStateFlow<String?>(null)
     val toast = _toast.asStateFlow()
 
+    /** Pre-filled prompt that the next visit to the chat consumes (editor AI actions, §4). */
+    private val _pendingPrompt = MutableStateFlow<String?>(null)
+    val pendingPrompt = _pendingPrompt.asStateFlow()
+
     fun notify(msg: String) { _toast.value = msg }
     fun clearToast() { _toast.value = null }
+
+    fun setPendingPrompt(text: String) { _pendingPrompt.value = text }
+    fun consumePendingPrompt(): String? = _pendingPrompt.value.also { _pendingPrompt.value = null }
+
+    // undo history for editor tabs: path -> stack of previous contents (cap 50)
+    private val undoStacks = mutableMapOf<String, MutableList<String>>()
+
+    fun undoTab(path: String) {
+        val tab = _tabs.value.find { it.path == path } ?: return
+        val stack = undoStacks[path] ?: return
+        if (stack.isEmpty()) return
+        val prev = stack.removeAt(stack.lastIndex)
+        _tabs.value = _tabs.value.map { if (it.path == path) it.copy(content = prev, dirty = true) else it }
+        notify("Undid last edit in $path")
+    }
+
+    fun canUndo(path: String): Boolean = (undoStacks[path]?.isNotEmpty()) == true
 
     val projectDir: File? get() = _active.value?.let { workspace.projectDir(it) }
     val files: ProjectFiles? get() = projectDir?.let { ProjectFiles(it) }
 
     init {
         refreshProjects()
+        (provider as? OpenRouterProvider)?.endpointValue = settings.endpoint.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
         settings.lastProjectId?.let { id -> _projects.value.find { it.id == id }?.let { open(it) } }
     }
 
@@ -126,6 +158,54 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         refreshProjects()
     }
 
+    // ---- Phase 3: import / export / storage --------------------------------
+    /** §41 — zip the active project into <filesDir>/exports and return the file (real bytes). */
+    fun exportProject(): Result<File> {
+        val p = _active.value ?: return Result.failure(IllegalStateException("Open a project first."))
+        return runCatching {
+            val exports = File(application.filesDir, "exports").apply { mkdirs() }
+            val out = File(exports, "${p.id}.zip")
+            workspace.exportZip(p, out).getOrThrow()
+            out
+        }
+    }
+
+    fun exportsDir(): File = File(application.filesDir, "exports").apply { mkdirs() }
+
+    /** §41 — create a project from a picked zip (content Uri), reading the real bytes. */
+    fun importProjectFromUri(name: String, type: ProjectType, uri: Uri): Result<Project> = runCatching {
+        val tmp = File(application.cacheDir, "import-${System.currentTimeMillis()}.zip")
+        application.contentResolver.openInputStream(uri)?.use { input ->
+            tmp.outputStream().use { input.copyTo(it) }
+        } ?: throw IllegalStateException("Could not read the selected archive.")
+        val result = workspace.createFromZip(name, type, tmp)
+        tmp.delete()
+        result.getOrThrow()
+    }
+
+    /** §41 — create a project from a real folder on disk. */
+    fun importProjectFromFolder(name: String, type: ProjectType, dir: File): Result<Project> =
+        workspace.createFromFolder(name, type, dir)
+
+    /** §52 — snapshot of storage, aggregated from real directories. */
+    fun storageSnapshot(): StorageSnapshot {
+        val projects = workspace.list().map { it to workspace.sizeOf(it) }
+        val runtime = application.linux.rootfsDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        val exports = exportsDir().walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        return StorageSnapshot(
+            projectsTotal = projects.sumOf { it.second },
+            runtimeSize = runtime,
+            exportsSize = exports,
+            projects = projects.map { (p, s) -> (p.name to s) },
+        )
+    }
+
+    /** §52 — safe cleanup: does not touch project files. */
+    fun clearExports(): Result<Unit> = runCatching {
+        exportsDir().walkTopDown().filter { it.isFile }.forEach { it.delete() }
+        notify("Cleared exported archives.")
+    }
+
     fun renameProject(project: Project, name: String) {
         workspace.rename(project, name).fold({
             refreshProjects()
@@ -161,6 +241,15 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateTab(path: String, content: String) {
+        val current = _tabs.value.find { it.path == path }
+        // Push the previous content onto the undo stack once per real change, so a keystroke can be
+        // undone (capped at 50 steps). No-op when the value did not actually change.
+        if (current != null && current.content != content) {
+            undoStacks.getOrPut(path) { mutableListOf() }.apply {
+                add(current.content)
+                if (size > 50) removeAt(0)
+            }
+        }
         _tabs.value = _tabs.value.map { if (it.path == path) it.copy(content = content, dirty = true) else it }
     }
 
@@ -192,6 +281,27 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteEntry(relative: String) {
         files?.delete(relative)?.fold({ notify("Deleted $relative"); closeTab(relative) }, { notify(it.message ?: "Failed") })
+    }
+
+    /** Phase 3 — rename a file or directory in the browser; tabs are remapped if needed. */
+    fun renameEntry(relative: String, newName: String) {
+        val f = files ?: return
+        val result = f.rename(relative, newName)
+        result.fold({
+            val old = if (relative.contains('/')) relative.substringBeforeLast('/') + "/" + newName else newName
+            _tabs.value = _tabs.value.map { t ->
+                when {
+                    t.path == relative -> t.copy(path = old)
+                    t.path.startsWith("$relative/") -> t.copy(path = old + t.path.removePrefix(relative))
+                    else -> t
+                }
+            }
+            if (activeTab.value?.startsWith("$relative/") == true || activeTab.value == relative) {
+                _activeTab.value = _tabs.value.firstOrNull { it.path == old }?.path
+                    ?: _tabs.value.firstOrNull { it.path.startsWith(old) }?.path
+            }
+            notify("Renamed $relative → $newName")
+        }, { notify(it.message ?: "Rename failed") })
     }
 
     // ---- conversation -------------------------------------------------------
@@ -251,7 +361,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
             val extra = settings.systemPrompt.trim()
             apiHistory.add(
                 0,
-                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\nProject: ${project.name} (${project.template})" + if (extra.isNotEmpty()) "\n\n$extra" else ""),
+                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\n" + typeContext(project) + if (extra.isNotEmpty()) "\n\n$extra" else ""),
             )
         }
         apiHistory += ChatMessage("user", prompt)
@@ -289,6 +399,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                                 },
                             )
                         }
+                        is AgentEvent.Usage -> mutateLast { m -> m.copy(usage = ev.usage) }
                         is AgentEvent.Failed -> {
                             _agentPhase.value = AgentPhase.Failed
                             _agentStatus.value = ev.error.title
@@ -306,6 +417,30 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                 reloadOpenTabs()
                 persistConversation()
             }
+        }
+    }
+
+    /**
+     * §45 — the agent gets the project's actual type plus the real commands it can run, so it never
+     * invents a build/preview command. Every line is derived from [Project.kind] metadata; a null
+     * command is reported as absent rather than guessed.
+     */
+    private fun typeContext(p: Project): String {
+        val k = p.kind
+        return buildString {
+            append("Project: ${p.name} (${k.label})")
+            append("\nType: ${k.id}")
+            if (k.languages.isNotBlank()) append("\nLanguage: ${k.languages}")
+            k.runCommand?.let { append("\nRun: $it") }
+            k.devCommand?.let { append("\nDev server: $it") }
+            k.buildCommand?.let { append("\nBuild: $it") }
+            if (k.requiredTools.isNotEmpty()) append("\nRequires: ${k.requiredTools.joinToString(", ")}")
+            append("\nPreview port: ${p.previewPort}")
+            append(
+                "\nRules for this project: only use run_command for a command that actually appears in " +
+                    "the project files (package.json scripts, build.gradle, etc.). Never guess a command. " +
+                    "After any edit, run the real build or dev command and report the actual output.",
+            )
         }
     }
 
@@ -356,17 +491,24 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     private val _modelsLoading = MutableStateFlow(false)
     val modelsLoading = _modelsLoading.asStateFlow()
 
-    fun loadModels() {
+    fun loadModels(force: Boolean = false) {
         if (_modelsLoading.value) return
         _modelsLoading.value = true
         _modelsError.value = null
         viewModelScope.launch {
-            provider.listModels().fold(
+            provider.listModels(force).fold(
                 { _models.value = it },
                 { _modelsError.value = it.message ?: "Could not load the model list." },
             )
             _modelsLoading.value = false
         }
+    }
+
+    /** §5 — point the provider at a compatible endpoint; blank restores the OpenRouter default. */
+    fun setEndpoint(url: String) {
+        settings.endpoint = url
+        (provider as? OpenRouterProvider)?.endpointValue = url.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
+        notify("Endpoint set to ${url.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }}")
     }
 
     fun selectModel(id: String) {

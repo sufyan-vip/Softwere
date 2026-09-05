@@ -17,6 +17,7 @@ import com.sufyan.harness.BuildConfig
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.HarnessColors
+import com.sufyan.harness.ui.theme.MonoStyle
 import com.sufyan.harness.ui.theme.Radius
 import com.sufyan.harness.ui.theme.Spacing
 import com.sufyan.harness.ui.theme.ThemeMode
@@ -27,6 +28,7 @@ fun SettingsScreen(
     onThemeChanged: (ThemeMode) -> Unit,
     onModels: () -> Unit,
     onToolchains: () -> Unit,
+    onStorage: () -> Unit,
 ) {
     val s = vm.settings
     var keyInput by remember { mutableStateOf("") }
@@ -41,6 +43,7 @@ fun SettingsScreen(
     var tabSize by remember { mutableIntStateOf(s.tabSize) }
     var systemPrompt by remember { mutableStateOf(s.systemPrompt) }
     var temperature by remember { mutableFloatStateOf(s.temperature) }
+    var endpoint by remember { mutableStateOf(s.endpoint) }
     var confirmClear by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
@@ -104,6 +107,27 @@ fun SettingsScreen(
                         Spacer(Modifier.height(Spacing.sm))
                         StatusChip(it, if (it.startsWith("Failed")) StatusKind.Error else StatusKind.Ok)
                     }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                Column(Modifier.padding(Spacing.lg)) {
+                    Text("Endpoint", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Blank uses the OpenRouter default. A compatible endpoint changes where models and completions come from.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    OutlinedTextField(
+                        value = endpoint,
+                        onValueChange = { endpoint = it },
+                        placeholder = { Text("https://openrouter.ai/api/v1") },
+                        singleLine = true,
+                        textStyle = MonoStyle,
+                        shape = RoundedCornerShape(Radius.md),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    SecondaryButton("Save endpoint", { vm.setEndpoint(endpoint) }, enabled = endpoint != s.endpoint)
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 Column(Modifier.padding(Spacing.lg)) {
@@ -188,7 +212,15 @@ fun SettingsScreen(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow("Clear all credentials", "Removes stored keys from this device", Icons.Default.LockReset, onClick = { confirmClear = true })
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                SettingRow("Workspace", vm.workspace.root.absolutePath, Icons.Default.Storage)
+                SettingRow(
+                    "Storage",
+                    "Projects, runtime and exports in use on this device",
+                    Icons.Default.Storage,
+                    trailing = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
+                    onClick = onStorage,
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow("Workspace", vm.workspace.root.absolutePath, Icons.Default.Folder)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow(
                     "Privacy",

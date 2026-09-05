@@ -40,10 +40,21 @@ data class ModelInfo(
     val isFree: Boolean get() = (promptPrice ?: 0.0) == 0.0 && (completionPrice ?: 0.0) == 0.0
 }
 
+/** §50 — real token usage when the provider reports it. Never invented. */
+@Serializable
+data class Usage(
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val totalTokens: Int = 0,
+) {
+    val isEmpty: Boolean get() = totalTokens == 0
+}
+
 /** Incremental events emitted while a completion streams. */
 sealed interface StreamEvent {
     data class Text(val delta: String) : StreamEvent
     data class Tools(val calls: List<ToolCall>) : StreamEvent
+    data class Usage(val usage: com.sufyan.harness.ai.Usage) : StreamEvent
     data class Failed(val error: AiError) : StreamEvent
     data object Done : StreamEvent
 }
@@ -57,7 +68,12 @@ data class AiError(
 /** Provider abstraction — OpenRouter is the first implementation, not the only possible one. */
 interface AiProvider {
     val displayName: String
-    suspend fun listModels(): Result<List<ModelInfo>>
+
+    /**
+     * Lists models. `force` bypasses the in-memory TTL cache so a manual refresh always hits the
+     * network; otherwise a recently fetched list is returned without a call.
+     */
+    suspend fun listModels(force: Boolean = false): Result<List<ModelInfo>>
     fun stream(
         model: String,
         messages: List<ChatMessage>,

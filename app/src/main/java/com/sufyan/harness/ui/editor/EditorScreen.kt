@@ -2,6 +2,7 @@ package com.sufyan.harness.ui.editor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -36,7 +37,7 @@ import com.sufyan.harness.ui.theme.Spacing
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit) {
+fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit, onChat: () -> Unit) {
     val project by vm.active.collectAsState()
     val tabs by vm.tabs.collectAsState()
     val activePath by vm.activeTab.collectAsState()
@@ -44,6 +45,13 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
     var showTree by remember { mutableStateOf(true) }
     var newEntry by remember { mutableStateOf<String?>(null) }
     var searchQuery by remember { mutableStateOf<String?>(null) }
+    var menuPath by remember { mutableStateOf<String?>(null) }
+    var renamePath by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf<String?>(null) }
+    var showFind by remember { mutableStateOf(false) }
+    var findQuery by remember { mutableStateOf("") }
+    var replaceQuery by remember { mutableStateOf("") }
+    var aiMenu by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         AppTopBar(
@@ -99,7 +107,7 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
                                 isOpen = rel in expanded,
                                 selected = rel == activePath,
                                 onClick = { if (node.isDir) vm.toggleDir(rel) else vm.openFile(rel) },
-                                onLongClick = { vm.deleteEntry(rel) },
+                                onLongClick = { menuPath = rel },
                             )
                         }
                     }
@@ -149,6 +157,49 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
                 EmptyState(Icons.Outlined.Code, "No file open", "Pick a file from the tree above to start editing.")
             }
         } else {
+            // Editor toolbar: find/replace, undo, AI actions (§4).
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = Spacing.sm, vertical = Spacing.xs),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = showFind,
+                    onClick = { showFind = !showFind },
+                    label = { Text("Find / Replace", style = MaterialTheme.typography.labelSmall) },
+                    shape = RoundedCornerShape(Radius.pill),
+                )
+                FilterChip(
+                    selected = false,
+                    onClick = { vm.undoTab(tab.path) },
+                    enabled = vm.canUndo(tab.path),
+                    label = { Text("Undo", style = MaterialTheme.typography.labelSmall) },
+                    shape = RoundedCornerShape(Radius.pill),
+                )
+                FilterChip(
+                    selected = false,
+                    onClick = { aiMenu = true },
+                    label = { Text("AI actions", style = MaterialTheme.typography.labelSmall) },
+                    shape = RoundedCornerShape(Radius.pill),
+                )
+            }
+            if (showFind) {
+                FindReplaceBar(
+                    fileContent = tab.content,
+                    find = findQuery,
+                    replace = replaceQuery,
+                    onFindChange = { findQuery = it },
+                    onReplaceChange = { replaceQuery = it },
+                    onApply = { newContent ->
+                        vm.updateTab(tab.path, newContent)
+                        vm.notify("Replaced ${countMatches(tab.content, findQuery)} occurrence(s) of \"$findQuery\"")
+                    },
+                    onClose = { showFind = false },
+                )
+            }
             CodeEditor(
                 content = tab.content,
                 fontSize = vm.settings.editorFontSize.sp,
@@ -221,7 +272,7 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
                 if (value.length > 1 && results.isEmpty()) {
                     Text("No matches.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                LazyColumn { items(results) { r ->
+                    LazyColumn { items(results) { r ->
                     Text(
                         r,
                         style = MonoStyle.copy(fontSize = 11.sp),
@@ -234,8 +285,103 @@ fun EditorScreen(vm: HarnessViewModel, onPreview: () -> Unit, onGit: () -> Unit)
             }
         }
     }
+
+    menuPath?.let { rel ->
+        ModalBottomSheet(onDismissRequest = { menuPath = null }, containerColor = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.padding(bottom = Spacing.xl)) {
+                Text(
+                    rel.substringAfterLast('/'),
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+                )
+                SettingRow("Rename", "Change this file or folder's name", Icons.Default.DriveFileRenameOutline, onClick = {
+                    renamePath = rel; menuPath = null
+                })
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow("Delete", "Permanently removes it", Icons.Default.DeleteOutline, onClick = {
+                    confirmDelete = rel; menuPath = null
+                })
+            }
+        }
+    }
+
+    renamePath?.let { rel ->
+        var value by remember(rel) { mutableStateOf(rel.substringAfterLast('/')) }
+        AlertDialog(
+            onDismissRequest = { renamePath = null },
+            title = { Text("Rename") },
+            text = {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it },
+                    singleLine = true,
+                    label = { Text("New name") },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.renameEntry(rel, value.trim().substringAfterLast('/'))
+                    renamePath = null
+                }) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renamePath = null }) { Text("Cancel") } },
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
+
+    confirmDelete?.let { rel ->
+        ConfirmDialog(
+            "Delete ${rel.substringAfterLast('/')}?",
+            "This permanently removes the file or folder from the project. This cannot be undone.",
+            "Delete",
+            destructive = true,
+            onConfirm = { vm.deleteEntry(rel); confirmDelete = null },
+            onDismiss = { confirmDelete = null },
+        )
+    }
+
+    if (aiMenu) {
+        val aiTab = tabs.find { it.path == activePath }
+        ModalBottomSheet(onDismissRequest = { aiMenu = false }, containerColor = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.padding(bottom = Spacing.xl)) {
+                Text(
+                    "AI on ${aiTab?.path ?: "file"}",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+                )
+                val content = aiTab?.content
+                if (content == null) {
+                    Text(
+                        "Open a file first.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = Spacing.lg),
+                    )
+                } else {
+                    SettingRow("Explain this file", "What does it do and how?", Icons.Default.Info, onClick = {
+                        vm.setPendingPrompt("Explain the file ${aiTab.path}:\n\n$content")
+                        aiMenu = false
+                        onChat()
+                    })
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SettingRow("Find bugs & fix", "Look for problems and correct them", Icons.Default.BugReport, onClick = {
+                        vm.setPendingPrompt("Look for bugs in ${aiTab.path} and fix them:\n\n$content")
+                        aiMenu = false
+                        onChat()
+                    })
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SettingRow("Refactor", "Improve readability without changing behaviour", Icons.Default.Refresh, onClick = {
+                        vm.setPendingPrompt("Refactor ${aiTab.path} for clarity and readability without changing behaviour:\n\n$content")
+                        aiMenu = false
+                        onChat()
+                    })
+                }
+            }
+        }
+    }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(
     name: String,
@@ -250,7 +396,7 @@ private fun FileRow(
         Modifier
             .fillMaxWidth()
             .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(start = Spacing.lg + (depth * 14).dp, end = Spacing.lg, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -267,6 +413,73 @@ private fun FileRow(
         Spacer(Modifier.width(Spacing.sm))
         Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 1)
     }
+}
+
+/** §4 — find and replace within the open file. Always operates on the real tab content. */
+@Composable
+private fun FindReplaceBar(
+    fileContent: String,
+    find: String,
+    replace: String,
+    onFindChange: (String) -> Unit,
+    onReplaceChange: (String) -> Unit,
+    onApply: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    val matches = countMatches(fileContent, find)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
+            .horizontalScroll(rememberScrollState()),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        OutlinedTextField(
+            value = find,
+            onValueChange = onFindChange,
+            placeholder = { Text("Find", style = MaterialTheme.typography.labelSmall) },
+            singleLine = true,
+            textStyle = MonoStyle.copy(fontSize = 12.sp),
+            modifier = Modifier.width(150.dp),
+        )
+        OutlinedTextField(
+            value = replace,
+            onValueChange = onReplaceChange,
+            placeholder = { Text("Replace", style = MaterialTheme.typography.labelSmall) },
+            singleLine = true,
+            textStyle = MonoStyle.copy(fontSize = 12.sp),
+            modifier = Modifier.width(150.dp),
+        )
+        TextButton(
+            onClick = { if (find.isNotEmpty() && matches > 0) onApply(fileContent.replaceFirst(find, replace)) },
+            enabled = find.isNotEmpty() && matches > 0,
+        ) { Text("Replace", style = MaterialTheme.typography.labelSmall) }
+        TextButton(
+            onClick = { if (find.isNotEmpty()) onApply(fileContent.replace(find, replace)) },
+            enabled = find.isNotEmpty() && matches > 0,
+        ) { Text("All", style = MaterialTheme.typography.labelSmall) }
+        Text(
+            "$matches match${if (matches == 1) "" else "es"}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Default.Close, contentDescription = "Close find", modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+/** Non-overlapping count of [query] in [content]. */
+private fun countMatches(content: String, query: String): Int {
+    if (query.isEmpty()) return 0
+    var count = 0
+    var idx = content.indexOf(query)
+    while (idx != -1) {
+        count++
+        idx = content.indexOf(query, idx + query.length)
+    }
+    return count
 }
 
 /** Editable code surface with gutter and lightweight keyword highlighting. */
