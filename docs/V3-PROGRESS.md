@@ -42,7 +42,7 @@ if the code behind it really runs (RULE 3, no fake success).
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Complete audit | DONE (this file) |
-| 1 | UI/UX rebuild: Projects, project details, agent workspace, terminal, dialogs, empty/loading/error | IN PROGRESS — see below |
+| 1 | UI/UX rebuild: Projects, project details, agent workspace, terminal, dialogs, empty/loading/error | DONE — agent workspace timeline + state bar + session summary, project dashboard, ProjectDetailScreen, creation-flow type cards, terminal chrome and selectable output. Built green in CI |
 | 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | STARTED (type stored in metadata; Android scaffold pending Phase 11) |
 | 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | TODO |
 | 4 | Code editor | TODO |
