@@ -45,7 +45,7 @@ if the code behind it really runs (RULE 3, no fake success).
 | 1 | UI/UX rebuild: Projects, project details, agent workspace, terminal, dialogs, empty/loading/error | DONE — agent workspace timeline + state bar + session summary, project dashboard, ProjectDetailScreen, creation-flow type cards, terminal chrome and selectable output. Built green in CI |
 | 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | DONE — type metadata drives scaffold/preview/build/toolchain hints + agent prompt context; every template verifies the files it declares on disk; Android App still correctly gated to Phase 11 |
 | 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | DONE — browser CRUD (create/rename/delete), real ZIP export + import, real folder import, search, per-project + total + runtime storage with a Storage manager |
-| 4 | Code editor | TODO |
+| 4 | Code editor (syntax, tabs, search, replace, save, undo, AI actions) | DONE — tabs, dirty state, save, line numbers, lightweight syntax highlight, project search, in-file find/replace with match count, undo stack, editor AI actions routed to the chat composer |
 | 5 | OpenRouter (models, keys, fallbacks) | TODO |
 | 6 | True AI agent (planning, tool budget, verification) | TODO |
 | 7 | Terminal repair | TODO |
@@ -134,3 +134,21 @@ File system completeness, real import/export and a storage manager.
 
 `ProjectArchiveTest` covers export→import round-trip, zip-slip refusal, top-level-folder stripping and
 folder copy.
+
+## PHASE 4 — what this change set does (§60 Phase 4)
+
+The editor is usable for real editing workflows.
+
+1. **Find / Replace.** A toggle in the editor toolbar opens an in-file bar with a match count and both
+   "Replace" (first occurrence) and "All" buttons. It always operates on the actual tab content — the
+   result is pushed through `updateTab`, so the file becomes dirty and undoable.
+2. **Undo.** `HarnessViewModel` keeps a per-tab undo stack (capped at 50) pushed on every real change.
+   An "Undo" chip on the toolbar restores the previous content; it is enabled only when there is
+   history to undo.
+3. **AI actions.** An "AI actions" menu offers Explain / Find bugs & fix / Refactor, each producing a
+   pending prompt containing the file content. The prompt is routed to the chat composer
+   (`vm.pendingPrompt`), so the agent starts with the file in context.
+4. **Editor route** gains an `onChat` navigation callback.
+
+(Previously-present tabs, dirty state, save, line numbers, keyword highlighting and project search are
+retained; the `combinedClickable` import needed for the long-press row was also fixed.)
