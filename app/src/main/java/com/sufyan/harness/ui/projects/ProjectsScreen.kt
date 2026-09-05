@@ -35,6 +35,7 @@ fun ProjectsScreen(
     onNewProject: () -> Unit,
     onOpenChat: () -> Unit,
     onProjectSettings: () -> Unit,
+    onOpenDetails: () -> Unit = {},
 ) {
     val projects by vm.projects.collectAsState()
     val active by vm.active.collectAsState()
@@ -59,8 +60,8 @@ fun ProjectsScreen(
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
-            title = greeting(),
-            subtitle = "Your Workspace",
+            title = "Sufyan Harness",
+            subtitle = "Your Workspace · Build. Code. Run. Ship — from Android.",
             actions = {
                 IconButton(onClick = { vm.refreshProjects() }) {
                     Icon(Icons.Default.Refresh, contentDescription = "Refresh projects")
@@ -149,6 +150,7 @@ fun ProjectsScreen(
             Column(Modifier.padding(bottom = Spacing.xl)) {
                 Text(p.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm))
                 SettingRow("Open", icon = Icons.Default.OpenInNew, onClick = { vm.open(p); menuFor = null; onOpenChat() })
+                SettingRow("Details", subtitle = "Runtime, git, checkpoints, actions", icon = Icons.Default.Info, onClick = { vm.open(p); menuFor = null; onOpenDetails() })
                 SettingRow("Rename", icon = Icons.Default.DriveFileRenameOutline, onClick = { renaming = p; menuFor = null })
                 SettingRow(
                     "Storage",
@@ -245,7 +247,7 @@ private fun ProjectCard(
                 )
             }
             Spacer(Modifier.width(Spacing.md))
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(project.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                     if (isActive) {
@@ -254,15 +256,36 @@ private fun ProjectCard(
                     }
                 }
                 Text(
-                    project.template.replaceFirstChar { it.uppercase() },
+                    "${project.kind.label} • ${project.kind.languages}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
-                Text(
-                    "Updated ${relativeTime(project.updatedAt)} • ${formatBytes(vm.workspace.sizeOf(project))}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Updated ${relativeTime(project.updatedAt)} • ${formatBytes(vm.workspace.sizeOf(project))}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isActive) {
+                    val git by vm.git.collectAsState()
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm), verticalAlignment = Alignment.CenterVertically) {
+                        StatusChip(
+                            when {
+                                git == null -> "workspace open"
+                                git?.isRepo != true -> "no git repo"
+                                git?.changes?.isEmpty() == true -> "clean · ${git?.branch ?: "detached"}"
+                                else -> "${git?.changes?.size ?: 0} changed · ${git?.branch ?: "detached"}"
+                            },
+                            when {
+                                git?.isRepo == true && git?.changes?.isEmpty() == true -> StatusKind.Ok
+                                git?.isRepo == true -> StatusKind.Warn
+                                else -> StatusKind.Neutral
+                            },
+                        )
+                    }
+                }
             }
             IconButton(onClick = onMenu) {
                 Icon(Icons.Default.MoreVert, contentDescription = "Project menu for ${project.name}")

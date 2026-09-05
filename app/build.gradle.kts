@@ -65,6 +65,12 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.2")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
+    // viewModelScope lives in the viewmodel ktx artefact — declared explicitly so the
+    // compile classpath does not depend on which transitive path happens to expose it.
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.2")
+    implementation("androidx.compose.foundation:foundation")
+    // AnimatedVisibility is in animation (not animation-core) and is used by the chat UI.
+    implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")

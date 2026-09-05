@@ -9,9 +9,15 @@ on:
 permissions:
   contents: write
 
+# Only the most recent push per branch matters.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +29,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -30,17 +38,13 @@ jobs:
       - name: Generate Gradle wrapper
         run: gradle wrapper --gradle-version 8.7
 
-      - name: Lint
-        run: ./gradlew lintDebug --stacktrace
-
-      - name: Unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
-
-      - name: Assemble debug APK
-        run: ./gradlew assembleDebug --stacktrace
-
-      - name: Assemble release APK
-        run: ./gradlew assembleRelease --stacktrace
+      # One Gradle invocation with --continue: every compile error in the repo is
+      # reported in this single run instead of stopping at the first failing task.
+      - name: Lint, unit tests and assemble APKs
+        run: |
+          set -o pipefail
+          ./gradlew --continue --stacktrace \
+            lintDebug testDebugUnitTest assembleDebug assembleRelease 2>&1 | tee /tmp/gradle-build.log
 
       - name: Verify APKs
         run: |
@@ -77,3 +81,44 @@ jobs:
           name: reports
           path: |
             app/build/reports/**
+            app/build/test-results/**
+          if-no-files-found: ignore
+
+      # Failure reasons are turned into check annotations, so the root cause is
+      # readable from the run page even when the raw log is hard to open.
+      - name: Report build errors as annotations
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import os
+
+          LOG = "/tmp/gradle-build.log"
+          lines = []
+          if os.path.exists(LOG):
+              lines = open(LOG, encoding="utf-8", errors="replace").read().splitlines()
+
+          def esc(s):
+              return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          def emit(msg):
+              print("::error::" + esc(msg.strip())[:1200])
+
+          errors = [l.strip() for l in lines if l.startswith("e: ") or ": error:" in l]
+          errors = list(dict.fromkeys(errors))
+          if errors:
+              emit(f"{len(errors)} compiler error(s). First {min(len(errors), 9)} listed below.")
+              for e in errors[:9]:
+                  emit(e)
+          else:
+              start = next((i for i, l in enumerate(lines) if l.startswith("FAILURE: Build failed")), None)
+              if start is None:
+                  emit("Build failed and no compiler error was found in the Gradle output. Last lines:")
+                  emit("\n".join(lines[-15:]))
+              else:
+                  block, i = [], start
+                  while i < len(lines) and not lines[i].startswith("* Try:"):
+                      if lines[i].strip():
+                          block.append(lines[i].strip())
+                      i += 1
+                  emit("\n".join(block[:14]))
+          PY

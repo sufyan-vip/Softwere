@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -23,7 +25,27 @@ data class ToolActivity(
     val done: Boolean = false,
     val ok: Boolean = true,
     val detail: String = "",
+    /** Path for file tools, command line for run_command — taken from the real tool call. */
+    val target: String = "",
 )
+
+/**
+ * §16 of the V3 spec: the AI screen must show what the agent is doing right now. Every value
+ * below is derived from an actual event stream (tool names / the command being run), never
+ * animated on a timer, so a stalled request cannot look busy and a finished one cannot.
+ */
+enum class AgentPhase(val label: String, val busy: Boolean = true) {
+    Idle("Idle", false),
+    Thinking("AI is working"),
+    Inspecting("Inspecting project"),
+    Editing("Editing files"),
+    Running("Running command"),
+    Installing("Installing package"),
+    Building("Building"),
+    Complete("Complete", false),
+    Failed("Failed", false),
+    ;
+}
 
 @Serializable
 data class UiMessage(
@@ -37,7 +59,9 @@ data class OpenTab(val path: String, var content: String, var dirty: Boolean = f
 
 class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val application get() = getApplication<HarnessApp>()
+    // Cast here instead of AndroidViewModel.getApplication<HarnessApp>(), whose
+    // reified form only exists in some lifecycle artefact versions.
+    private val application: HarnessApp = app as HarnessApp
     val workspace get() = application.workspace
     val settings get() = application.settings
     val secure get() = application.secure
@@ -70,8 +94,8 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshProjects() { _projects.value = workspace.list() }
 
-    fun createProject(name: String, template: Template): Result<Project> =
-        workspace.create(name, template).onSuccess {
+    fun createProject(name: String, template: Template, type: ProjectType = ProjectType.from(null, template.id)): Result<Project> =
+        workspace.create(name, template, type).onSuccess {
             refreshProjects()
             open(it)
         }
@@ -175,6 +199,10 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     val messages = _messages.asStateFlow()
     private val _generating = MutableStateFlow(false)
     val generating = _generating.asStateFlow()
+    private val _agentPhase = MutableStateFlow(AgentPhase.Idle)
+    val agentPhase = _agentPhase.asStateFlow()
+    private val _agentStatus = MutableStateFlow("")
+    val agentStatus = _agentStatus.asStateFlow()
     private var agentJob: Job? = null
     private val apiHistory = mutableListOf<ChatMessage>()
 
@@ -233,14 +261,26 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         val model = project.modelId ?: settings.modelId
 
         _generating.value = true
+        _agentPhase.value = AgentPhase.Thinking
+        _agentStatus.value = "Waiting for $model"
         agentJob = viewModelScope.launch {
             try {
                 agent.run(model, apiHistory, settings.temperature).collect { ev ->
                     when (ev) {
-                        is AgentEvent.TextDelta -> mutateLast { it.copy(text = it.text + ev.delta) }
-                        is AgentEvent.Status -> mutateLast { it.copy(text = it.text) }
-                        is AgentEvent.ToolStarted -> mutateLast {
-                            it.copy(tools = it.tools + ToolActivity(ev.id, ev.name, ev.summary))
+                        is AgentEvent.TextDelta -> {
+                            if (_agentPhase.value == AgentPhase.Thinking) _agentStatus.value = "Writing answer"
+                            mutateLast { it.copy(text = it.text + ev.delta) }
+                        }
+                        is AgentEvent.Status -> {
+                            _agentStatus.value = ev.text
+                            mutateLast { it.copy(text = it.text) }
+                        }
+                        is AgentEvent.ToolStarted -> {
+                            _agentPhase.value = phaseFor(ev.name, ev.target)
+                            _agentStatus.value = ev.summary
+                            mutateLast {
+                                it.copy(tools = it.tools + ToolActivity(ev.id, ev.name, ev.summary, target = ev.target))
+                            }
                         }
                         is AgentEvent.ToolFinished -> mutateLast { m ->
                             m.copy(
@@ -249,13 +289,17 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                                 },
                             )
                         }
-                        is AgentEvent.Failed ->
+                        is AgentEvent.Failed -> {
+                            _agentPhase.value = AgentPhase.Failed
+                            _agentStatus.value = ev.error.title
                             _messages.value = _messages.value + UiMessage("error", "${ev.error.title}\n\n${ev.error.detail}")
-                        AgentEvent.TurnFinished -> Unit
+                        }
+                        AgentEvent.TurnFinished -> if (_agentPhase.value != AgentPhase.Failed) _agentPhase.value = AgentPhase.Complete
                     }
                 }
             } finally {
                 _generating.value = false
+                if (_agentPhase.value.busy) _agentPhase.value = AgentPhase.Complete
                 workspace.touch(project)
                 refreshProjects()
                 refreshGit()
@@ -263,6 +307,18 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                 persistConversation()
             }
         }
+    }
+
+    /** Maps a tool call onto the state shown in the agent status bar. No guessing, no timers. */
+    private fun phaseFor(tool: String, target: String): AgentPhase = when (tool) {
+        "list_files", "read_file", "search" -> AgentPhase.Inspecting
+        "write_file", "edit_file", "delete_file" -> AgentPhase.Editing
+        "run_command" -> when {
+            listOf("install", "add ", " i ", "i ", "pip ", "apk ").any { target.contains(it) } -> AgentPhase.Installing
+            listOf("build", "vite", "webpack", "gradle", "tsc", "assemble").any { target.contains(it) } -> AgentPhase.Building
+            else -> AgentPhase.Running
+        }
+        else -> AgentPhase.Running
     }
 
     private fun mutateLast(block: (UiMessage) -> UiMessage) {
@@ -274,6 +330,8 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     fun stopGeneration() {
         agentJob?.cancel()
         _generating.value = false
+        _agentPhase.value = AgentPhase.Idle
+        _agentStatus.value = "Stopped by you"
         notify("Generation stopped.")
     }
 
@@ -350,6 +408,12 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     val terminalLines = _terminalLines.asStateFlow()
     private val _shellRunning = MutableStateFlow(false)
     val shellRunning = _shellRunning.asStateFlow()
+    private val _shellCwd = MutableStateFlow<String?>(null)
+    /** Where the session was started; `cd` inside the shell is tracked in V3 phase 7. */
+    val shellCwd = _shellCwd.asStateFlow()
+    private val _commandRunning = MutableStateFlow(false)
+    /** True only while the shell process itself says it is executing a command. */
+    val commandRunning = _commandRunning.asStateFlow()
     val commandHistory = mutableListOf<String>()
 
     fun startShell() {
@@ -357,9 +421,26 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         if (shell != null) return
         val s = ShellSession(dir)
         shell = s
-        s.start().onFailure { notify(it.message ?: "Shell failed to start.") }
-        _shellRunning.value = true
+        s.start().fold(
+            {
+                _shellRunning.value = true
+                _shellCwd.value = dir.absolutePath
+            },
+            {
+                shell?.dispose()
+                shell = null
+                _shellRunning.value = false
+                notify(it.message ?: "Shell failed to start.")
+                return
+            },
+        )
         viewModelScope.launch { s.lines.collect { _terminalLines.value = it } }
+        viewModelScope.launch { s.running.collect { _commandRunning.value = it } }
+    }
+
+    fun restartShell() {
+        stopShell()
+        startShell()
     }
 
     fun runCommand(cmd: String) {
@@ -375,6 +456,8 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         shell?.dispose()
         shell = null
         _shellRunning.value = false
+        _commandRunning.value = false
+        _shellCwd.value = null
     }
 
     // ---- toolchains ---------------------------------------------------------
