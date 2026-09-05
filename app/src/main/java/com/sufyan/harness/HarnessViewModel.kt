@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -37,7 +39,9 @@ data class OpenTab(val path: String, var content: String, var dirty: Boolean = f
 
 class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val application get() = getApplication<HarnessApp>()
+    // Cast here instead of AndroidViewModel.getApplication<HarnessApp>(), whose
+    // reified form only exists in some lifecycle artefact versions.
+    private val application: HarnessApp = app as HarnessApp
     val workspace get() = application.workspace
     val settings get() = application.settings
     val secure get() = application.secure

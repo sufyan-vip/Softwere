@@ -41,7 +41,7 @@ class Workspace(private val context: Context) {
 
     fun list(): List<Project> {
         if (!indexFile.exists()) return emptyList()
-        return runCatching { json.decodeFromString<ProjectIndex>(indexFile.readText()).projects }
+        return runCatching { json.decodeFromString(ProjectIndex.serializer(), indexFile.readText()).projects }
             .getOrElse { emptyList() }
             .filter { File(root, it.id).isDirectory }
             .sortedByDescending { it.updatedAt }
