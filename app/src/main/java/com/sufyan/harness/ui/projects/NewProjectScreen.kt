@@ -154,7 +154,7 @@ fun NewProjectScreen(vm: HarnessViewModel, onDone: () -> Unit) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 Spacer(Modifier.height(Spacing.md))
                 Text(
-                    if (type == null) "Pick what you are building first." else "Writes: ${type.template.description}",
+                    type?.let { "Writes: ${it.template.description}" } ?: "Pick what you are building first.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
