@@ -631,6 +631,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         val agent = Agent(
             provider = provider,
             tools = tools,
+            maxIterations = settings.agentMaxSteps,
             contextBudget = settings.contextBudget,
             verification = verification,
             fallbackModel = settings.fallbackModelId,
@@ -644,42 +645,83 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         recovery.begin(Recovery.Operation.AgentTurn, "${project.name}: ${prompt.take(120)}")
         agentJob = viewModelScope.launch {
             try {
-                agent.run(model, apiHistory, settings.temperature).collect { ev ->
-                    when (ev) {
-                        is AgentEvent.TextDelta -> {
-                            if (_agentPhase.value == AgentPhase.Thinking) _agentStatus.value = "Writing answer"
-                            mutateLast { it.copy(text = it.text + ev.delta) }
-                        }
-                        is AgentEvent.Status -> {
-                            _agentStatus.value = ev.text
-                            mutateLast { it.copy(text = it.text) }
-                        }
-                        is AgentEvent.ToolStarted -> {
-                            _agentPhase.value = phaseFor(ev.name, ev.target)
-                            _agentStatus.value = ev.summary
-                            mutateLast {
-                                it.copy(tools = it.tools + ToolActivity(ev.id, ev.name, ev.summary, target = ev.target))
+                // §18 — a turn that runs out of steps is paused, not failed. With auto-continue on,
+                // the next stretch starts immediately and the pause is only ever a log line; the
+                // number of automatic continuations is bounded so a loop can still not run away.
+                var stretch = 0
+                var stoppedAtLimit = 0
+                while (true) {
+                    var limitHit = 0
+                    agent.run(model, apiHistory, settings.temperature).collect { ev ->
+                        when (ev) {
+                            is AgentEvent.TextDelta -> {
+                                if (_agentPhase.value == AgentPhase.Thinking) _agentStatus.value = "Writing answer"
+                                mutateLast { it.copy(text = it.text + ev.delta) }
                             }
+                            is AgentEvent.Status -> {
+                                _agentStatus.value = ev.text
+                                mutateLast { it.copy(text = it.text) }
+                            }
+                            is AgentEvent.ToolStarted -> {
+                                _agentPhase.value = phaseFor(ev.name, ev.target)
+                                _agentStatus.value = ev.summary
+                                mutateLast {
+                                    it.copy(tools = it.tools + ToolActivity(ev.id, ev.name, ev.summary, target = ev.target))
+                                }
+                            }
+                            is AgentEvent.ToolFinished -> mutateLast { m ->
+                                m.copy(
+                                    tools = m.tools.map { t ->
+                                        if (t.id == ev.id) t.copy(done = true, ok = ev.ok, summary = ev.summary, detail = ev.detail) else t
+                                    },
+                                )
+                            }
+                            is AgentEvent.Verified -> {
+                                _agentStatus.value = if (ev.ok) "Verified with ${ev.command}" else "Verification failed — fixing"
+                                _agentPhase.value = if (ev.ok) AgentPhase.Complete else AgentPhase.Building
+                            }
+                            is AgentEvent.Usage -> mutateLast { m -> m.copy(usage = ev.usage) }
+                            is AgentEvent.Failed -> {
+                                _agentPhase.value = AgentPhase.Failed
+                                _agentStatus.value = ev.error.title
+                                _messages.value = _messages.value + UiMessage("error", "${ev.error.title}\n\n${ev.error.detail}")
+                            }
+                            is AgentEvent.StepLimit -> limitHit = ev.steps
+                            AgentEvent.TurnFinished -> if (_agentPhase.value != AgentPhase.Failed) _agentPhase.value = AgentPhase.Complete
                         }
-                        is AgentEvent.ToolFinished -> mutateLast { m ->
-                            m.copy(
-                                tools = m.tools.map { t ->
-                                    if (t.id == ev.id) t.copy(done = true, ok = ev.ok, summary = ev.summary, detail = ev.detail) else t
-                                },
-                            )
-                        }
-                        is AgentEvent.Verified -> {
-                            _agentStatus.value = if (ev.ok) "Verified with ${ev.command}" else "Verification failed — fixing"
-                            _agentPhase.value = if (ev.ok) AgentPhase.Complete else AgentPhase.Building
-                        }
-                        is AgentEvent.Usage -> mutateLast { m -> m.copy(usage = ev.usage) }
-                        is AgentEvent.Failed -> {
-                            _agentPhase.value = AgentPhase.Failed
-                            _agentStatus.value = ev.error.title
-                            _messages.value = _messages.value + UiMessage("error", "${ev.error.title}\n\n${ev.error.detail}")
-                        }
-                        AgentEvent.TurnFinished -> if (_agentPhase.value != AgentPhase.Failed) _agentPhase.value = AgentPhase.Complete
                     }
+
+                    val steps = limitHit
+                    if (steps == 0 || _agentPhase.value == AgentPhase.Failed) break
+                    if (!settings.agentAutoContinue || stretch >= MAX_AUTO_CONTINUE) {
+                        stoppedAtLimit = steps
+                        break
+                    }
+                    stretch++
+                    _agentStatus.value = "Step budget used — continuing automatically ($stretch/$MAX_AUTO_CONTINUE)"
+                    _agentPhase.value = AgentPhase.Thinking
+                    mutateLast { m ->
+                        m.copy(text = m.text + "\n\n_Continuing after $steps steps (auto-continue $stretch/$MAX_AUTO_CONTINUE)._\n\n")
+                    }
+                    apiHistory += ChatMessage(
+                        "user",
+                        "Continue from exactly where you stopped. Do not repeat work that is already done, " +
+                            "and finish with a short summary when the task is complete.",
+                    )
+                }
+
+                if (stoppedAtLimit > 0) {
+                    val used = stoppedAtLimit + stretch * stoppedAtLimit
+                    _agentStatus.value = "Paused after $used steps"
+                    _messages.value = _messages.value + UiMessage(
+                        "error",
+                        "Agent paused, not failed\n\n" +
+                            "This turn used its whole step budget ($stoppedAtLimit steps" +
+                            (if (stretch > 0) " x ${stretch + 1} stretches" else "") +
+                            "). Everything it did so far is saved and reviewable.\n\n" +
+                            "Tap Continue to carry on, or raise \"Agent steps per turn\" in Settings " +
+                            "(currently ${settings.agentMaxSteps}) and turn on automatic continuation.",
+                    )
                 }
             } finally {
                 _generating.value = false
@@ -1558,13 +1600,17 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---- §34-§39: cloud build (GitHub Actions) ------------------------------
+    // ---- §34-§39: cloud build and cloud commands (GitHub Actions) ----------
 
     private val _cloudBuild = MutableStateFlow(CloudBuildState())
     val cloudBuildState = _cloudBuild.asStateFlow()
     private var cloudJob: Job? = null
 
-    /** True when this project can be built in the cloud right now — each part is checked, not assumed. */
+    private val _cloudCommand = MutableStateFlow(CloudCommandState())
+    val cloudCommandState = _cloudCommand.asStateFlow()
+    private var cloudCommandJob: Job? = null
+
+    /** True when this project can use the cloud right now — each part is checked, not assumed. */
     fun cloudBuildBlockers(): List<String> {
         val p = _active.value
         return buildList {
@@ -1573,6 +1619,109 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
             if (p != null && p.repoFullName == null) add("This project is not linked to a GitHub repository.")
             if (!isOnline()) add("This device is offline.")
         }
+    }
+
+    /**
+     * Pushes the project and makes sure [workflowPath] exists on the branch. Returns `null` on
+     * success, or the reason it could not be done — the caller reports that reason as-is.
+     */
+    private suspend fun cloudPrepare(
+        project: Project,
+        full: String,
+        branch: String,
+        workflowPath: String,
+        yaml: String,
+        onPhase: (String) -> Unit,
+    ): String? {
+        onPhase("Checking the workflow on GitHub...")
+        val hasWorkflow = github.fetchFile(full, workflowPath, branch).isSuccess
+
+        onPhase("Collecting local changes...")
+        val dir = workspace.projectDir(project)
+        val local = withContext(Dispatchers.IO) { ProjectSync.collect(dir) }
+        val remoteSha = github.headSha(full, branch).getOrNull()
+        val remote = github.listTree(full, branch).getOrElse { emptyList() }
+        val status = withContext(Dispatchers.IO) { ProjectSync.status(local, remote, remoteSha, project.lastSyncSha) }
+        val payload = withContext(Dispatchers.IO) { ProjectSync.payload(local, status) }.toMutableMap()
+        if (!hasWorkflow) payload[workflowPath] = yaml.toByteArray()
+
+        if (payload.isEmpty() && status.deleted.isEmpty()) {
+            onPhase("GitHub is already up to date with this project.")
+            return null
+        }
+
+        onPhase("Pushing ${payload.size} file(s) to $full...")
+        val push = github.pushFiles(
+            fullName = full,
+            branch = branch,
+            message = if (hasWorkflow) "Sufyan Harness: sync before cloud run" else "Sufyan Harness: add cloud workflow",
+            files = payload,
+            deletions = status.deleted,
+            expectedSha = project.lastSyncSha ?: remoteSha,
+            onProgress = onPhase,
+        ).getOrElse { return it.message ?: "The push to GitHub failed." }
+
+        return when (push) {
+            is PushOutcome.Rejected ->
+                push.reason + " Resolve it on the GitHub screen, then try again."
+            is PushOutcome.Success -> {
+                project.lastSyncSha = push.commitSha
+                workspace.update(project)
+                _active.value = project.copy()
+                refreshSync()
+                null
+            }
+        }
+    }
+
+    /**
+     * Follows a dispatched run until it finishes. [onUpdate] receives the real step list every poll,
+     * so the UI shows what GitHub is actually doing rather than an indeterminate spinner.
+     */
+    private suspend fun followCloudRun(
+        full: String,
+        workflowFile: String,
+        branch: String,
+        dispatchedAt: Long,
+        onPhase: (String) -> Unit,
+        onUpdate: (CloudRun, List<CloudStep>, CloudBuild.Progress) -> Unit,
+    ): Result<CloudRun> {
+        onPhase("Waiting for GitHub to queue the run...")
+        var run: CloudRun? = null
+        val findDeadline = System.currentTimeMillis() + 90_000
+        while (run == null && System.currentTimeMillis() < findDeadline) {
+            delay(CloudBuild.POLL_MS)
+            run = github.latestWorkflowRun(full, workflowFile, branch, dispatchedAt).getOrNull()
+        }
+        val started = run
+            ?: return Result.failure(
+                IllegalStateException(
+                    "GitHub accepted the request but no run appeared within 90 seconds. Check the Actions tab of $full.",
+                ),
+            )
+
+        val deadline = System.currentTimeMillis() + CloudBuild.TIMEOUT_MS
+        var progress: CloudBuild.Progress = CloudBuild.Progress.Queued
+        while (System.currentTimeMillis() < deadline) {
+            val current = github.workflowRun(full, started.id).getOrNull()
+            if (current != null) {
+                progress = CloudBuild.progressOf(current.status, current.conclusion)
+                val steps = github.workflowRunSteps(full, started.id).getOrDefault(emptyList())
+                onUpdate(current, steps, progress)
+                if (current.status == "completed") {
+                    return when (val p = progress) {
+                        is CloudBuild.Progress.Ended -> Result.failure(IllegalStateException(p.explanation))
+                        else -> Result.success(current)
+                    }
+                }
+            }
+            delay(CloudBuild.POLL_MS)
+        }
+        return Result.failure(
+            IllegalStateException(
+                "The run was still going after ${CloudBuild.TIMEOUT_MS / 60_000} minutes, so the app stopped waiting. It is still running on GitHub.",
+            ),
+        )
     }
 
     /**
@@ -1600,49 +1749,9 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
         cloudJob = viewModelScope.launch {
             try {
-                // 1 — the repository has to contain the project *and* a workflow that can build it.
-                cloudPhase("Checking the workflow on GitHub...")
-                val hasWorkflow = github.fetchFile(full, CloudBuild.WORKFLOW_PATH, branch).isSuccess
+                cloudPrepare(p, full, branch, CloudBuild.WORKFLOW_PATH, CloudBuild.workflowYaml()) { cloudPhase(it) }
+                    ?.let { return@launch cloudFail(it) }
 
-                cloudPhase("Collecting local changes...")
-                val dir = workspace.projectDir(p)
-                val local = withContext(Dispatchers.IO) { ProjectSync.collect(dir) }
-                val remoteSha = github.headSha(full, branch).getOrNull()
-                val remote = github.listTree(full, branch).getOrElse { emptyList() }
-                val status = withContext(Dispatchers.IO) { ProjectSync.status(local, remote, remoteSha, p.lastSyncSha) }
-                val payload = withContext(Dispatchers.IO) { ProjectSync.payload(local, status) }.toMutableMap()
-                if (!hasWorkflow) {
-                    payload[CloudBuild.WORKFLOW_PATH] = CloudBuild.workflowYaml().toByteArray()
-                }
-
-                if (payload.isNotEmpty() || status.deleted.isNotEmpty()) {
-                    cloudPhase("Pushing ${payload.size} file(s) to $full...")
-                    val push = github.pushFiles(
-                        fullName = full,
-                        branch = branch,
-                        message = if (hasWorkflow) "Sufyan Harness: sync before cloud build" else "Sufyan Harness: add cloud build workflow",
-                        files = payload,
-                        deletions = status.deleted,
-                        expectedSha = p.lastSyncSha ?: remoteSha,
-                        onProgress = { line -> cloudPhase(line) },
-                    ).getOrElse { return@launch cloudFail(it.message ?: "The push to GitHub failed.") }
-
-                    when (push) {
-                        is PushOutcome.Rejected -> return@launch cloudFail(
-                            push.reason + " Resolve it on the GitHub screen, then start the cloud build again.",
-                        )
-                        is PushOutcome.Success -> {
-                            p.lastSyncSha = push.commitSha
-                            workspace.update(p)
-                            _active.value = p.copy()
-                            refreshSync()
-                        }
-                    }
-                } else {
-                    cloudPhase("GitHub is already up to date with this project.")
-                }
-
-                // 2 — start the run.
                 val dispatchedAt = System.currentTimeMillis()
                 cloudPhase("Starting the $wanted build on GitHub...")
                 github.dispatchWorkflow(
@@ -1654,32 +1763,14 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
 
-                // 3 — find the run we just started (never adopt someone else's).
-                cloudPhase("Waiting for GitHub to queue the run...")
-                var run: CloudRun? = null
-                val findDeadline = System.currentTimeMillis() + 90_000
-                while (run == null && System.currentTimeMillis() < findDeadline) {
-                    delay(CloudBuild.POLL_MS)
-                    run = github.latestWorkflowRun(full, CloudBuild.WORKFLOW_FILE, branch, dispatchedAt).getOrNull()
-                }
-                if (run == null) {
-                    return@launch cloudFail(
-                        "GitHub accepted the request but no run appeared within 90 seconds. Check the Actions tab of $full.",
-                    )
-                }
-                _cloudBuild.value = _cloudBuild.value.copy(runUrl = run.htmlUrl)
-
-                // 4 — follow it step by step.
-                val deadline = System.currentTimeMillis() + CloudBuild.TIMEOUT_MS
-                var progress: CloudBuild.Progress = CloudBuild.Progress.Queued
-                while (System.currentTimeMillis() < deadline) {
-                    val current = github.workflowRun(full, run.id).getOrNull()
-                    if (current != null) {
-                        progress = CloudBuild.progressOf(current.status, current.conclusion)
-                        val steps = github.workflowRunSteps(full, run.id).getOrDefault(emptyList())
+                val run = followCloudRun(
+                    full, CloudBuild.WORKFLOW_FILE, branch, dispatchedAt,
+                    onPhase = { cloudPhase(it) },
+                    onUpdate = { current, steps, progress ->
                         val active = steps.lastOrNull { it.status == "in_progress" }?.name
                             ?: steps.lastOrNull { it.conclusion != null }?.name
                         _cloudBuild.value = _cloudBuild.value.copy(
+                            runUrl = current.htmlUrl,
                             steps = steps,
                             phase = when (progress) {
                                 CloudBuild.Progress.Queued -> "Queued on GitHub..."
@@ -1688,20 +1779,9 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                                 is CloudBuild.Progress.Ended -> "Run ended"
                             },
                         )
-                        if (current.status == "completed") break
-                    }
-                    delay(CloudBuild.POLL_MS)
-                }
+                    },
+                ).getOrElse { return@launch cloudFail(it.message ?: "The cloud build did not finish.") }
 
-                when (val result = progress) {
-                    is CloudBuild.Progress.Ended -> return@launch cloudFail(result.explanation)
-                    CloudBuild.Progress.Succeeded -> Unit
-                    else -> return@launch cloudFail(
-                        "The run was still going after ${CloudBuild.TIMEOUT_MS / 60_000} minutes, so the app stopped waiting. It is still running on GitHub.",
-                    )
-                }
-
-                // 5 — download, verify, offer to install. Nothing is claimed before this succeeds.
                 cloudPhase("Downloading the APK...")
                 val artifacts = github.runArtifacts(full, run.id).getOrElse {
                     return@launch cloudFail(it.message ?: "Could not list the run's artifacts.")
@@ -1753,6 +1833,133 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * §21-§28 — runs one command on a real Linux machine and brings the output back to the terminal.
+     *
+     * Android has no package manager for a sandboxed app: `apt`, `pkg`, `npm -g` and friends cannot
+     * be installed here, and an app targeting a modern API level may not execute binaries from its
+     * own data directory even if it downloaded them. So instead of a terminal that can never grow
+     * tools, commands can run in the project's GitHub repository on Ubuntu, where node, npm, python,
+     * java, git and `sudo apt-get` all exist — and the real output comes back, exit code included.
+     */
+    fun runCloudCommand(command: String) {
+        val cmd = command.trim()
+        if (cmd.isEmpty()) return
+        val p = _active.value ?: return notify("Open a project first.")
+        val blockers = cloudBuildBlockers()
+        if (blockers.isNotEmpty()) {
+            _cloudCommand.value = CloudCommandState(command = cmd, error = blockers.joinToString(" "))
+            return
+        }
+        if (_cloudCommand.value.running) return notify("A cloud command is already running.")
+        val full = p.repoFullName!!
+        val branch = p.repoBranch ?: "main"
+        commandHistory += cmd
+        settings.pushCommand(cmd)
+
+        _cloudCommand.value = CloudCommandState(running = true, command = cmd, phase = "Preparing...")
+        tasks.start(TASK_CLOUD_CMD, "Cloud command: ${cmd.take(40)}", RuntimeTask.Kind.Shell)
+
+        cloudCommandJob = viewModelScope.launch {
+            try {
+                cloudPrepare(
+                    p, full, branch, CloudBuild.COMMAND_WORKFLOW_PATH, CloudBuild.commandWorkflowYaml(),
+                ) { commandPhase(it) }?.let { return@launch commandFail(it) }
+
+                val dispatchedAt = System.currentTimeMillis()
+                commandPhase("Starting the command on GitHub...")
+                github.dispatchWorkflow(
+                    full, CloudBuild.COMMAND_WORKFLOW_FILE, branch, mapOf("command" to cmd),
+                ).getOrElse {
+                    return@launch commandFail(
+                        (it.message ?: "GitHub refused to start the command.") +
+                            " Cloud commands need a token with the `workflow` scope.",
+                    )
+                }
+
+                val run = followCloudRun(
+                    full, CloudBuild.COMMAND_WORKFLOW_FILE, branch, dispatchedAt,
+                    onPhase = { commandPhase(it) },
+                    onUpdate = { current, steps, progress ->
+                        val active = steps.lastOrNull { it.status == "in_progress" }?.name
+                        _cloudCommand.value = _cloudCommand.value.copy(
+                            runUrl = current.htmlUrl,
+                            phase = when (progress) {
+                                CloudBuild.Progress.Queued -> "Queued on GitHub..."
+                                CloudBuild.Progress.Running -> active?.let { "Running: $it" } ?: "Running..."
+                                CloudBuild.Progress.Succeeded -> "Finished — fetching the output..."
+                                is CloudBuild.Progress.Ended -> "Run ended"
+                            },
+                        )
+                    },
+                )
+                // A non-zero exit makes the run "fail", which is not an app error: the output is
+                // still uploaded and is exactly what the user needs to see.
+                val runId = run.getOrNull()?.id
+                    ?: github.latestWorkflowRun(full, CloudBuild.COMMAND_WORKFLOW_FILE, branch, dispatchedAt)
+                        .getOrNull()?.id
+                if (runId == null) {
+                    return@launch commandFail(run.exceptionOrNull()?.message ?: "The command did not run.")
+                }
+
+                commandPhase("Downloading the output...")
+                val artifacts = github.runArtifacts(full, runId).getOrDefault(emptyList())
+                val log = artifacts.firstOrNull { it.name == CloudBuild.COMMAND_ARTIFACT }
+                    ?: artifacts.firstOrNull()
+                if (log == null) {
+                    return@launch commandFail(
+                        run.exceptionOrNull()?.message
+                            ?: "The run produced no output artifact. Open the run on GitHub to see why.",
+                    )
+                }
+                val zip = File(application.cacheDir, "cloud-cmd-$runId.zip")
+                github.downloadArtifact(full, log.id, zip).getOrElse {
+                    return@launch commandFail(it.message ?: "Downloading the output failed.")
+                }
+                val file = withContext(Dispatchers.IO) {
+                    CloudBuild.extractLog(zip, File(application.cacheDir, "cloud-cmd"))
+                }.getOrElse { return@launch commandFail(it.message ?: "The output could not be read.") }
+                val text = withContext(Dispatchers.IO) { file.readText() }
+                zip.delete()
+
+                val lines = text.lines().takeLast(settings.terminalScrollback)
+                val exit = Regex("""exit code:\s*(-?\d+)""").find(text)?.groupValues?.get(1)?.toIntOrNull()
+                _cloudCommand.value = _cloudCommand.value.copy(
+                    running = false,
+                    phase = if (exit == 0) "Finished" else "Finished with exit code ${exit ?: "?"}",
+                    output = lines,
+                    exitCode = exit,
+                    error = if (exit == null || exit == 0) null else "The command exited with code $exit.",
+                )
+                if (settings.notifyOnTaskComplete) {
+                    RuntimeService.notifyCompleted(application, "Cloud command finished", cmd.take(60))
+                }
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                commandFail(t.message ?: "The cloud command failed.")
+            } finally {
+                tasks.finish(TASK_CLOUD_CMD)
+                if (_cloudCommand.value.running) {
+                    _cloudCommand.value = _cloudCommand.value.copy(running = false)
+                }
+            }
+        }
+    }
+
+    fun stopFollowingCloudCommand() {
+        cloudCommandJob?.cancel()
+        cloudCommandJob = null
+        tasks.finish(TASK_CLOUD_CMD)
+        _cloudCommand.value = _cloudCommand.value.copy(
+            running = false,
+            phase = "Stopped watching — the command is still running on GitHub.",
+        )
+    }
+
+    fun clearCloudCommand() {
+        _cloudCommand.value = CloudCommandState()
+    }
+
     /** Stops following the run. Honest wording: GitHub keeps building; only the app stops watching. */
     fun stopFollowingCloudBuild() {
         cloudJob?.cancel()
@@ -1775,6 +1982,14 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun cloudFail(reason: String) {
         _cloudBuild.value = _cloudBuild.value.copy(running = false, error = reason)
+    }
+
+    private fun commandPhase(text: String) {
+        _cloudCommand.value = _cloudCommand.value.copy(phase = text, error = null)
+    }
+
+    private fun commandFail(reason: String) {
+        _cloudCommand.value = _cloudCommand.value.copy(running = false, error = reason)
     }
 
     /** §37 — hands the verified APK to the system installer. */
@@ -1879,5 +2094,9 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         const val TASK_SHELL = "shell"
         const val TASK_SYNC = "sync"
         const val TASK_CLOUD = "cloud-build"
+        const val TASK_CLOUD_CMD = "cloud-command"
+
+        /** Hard ceiling on automatic continuations, so "no limit" can still never mean "forever". */
+        const val MAX_AUTO_CONTINUE = 5
     }
 }

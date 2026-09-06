@@ -11,6 +11,11 @@ sealed interface AgentEvent {
     data class ToolFinished(val id: String, val ok: Boolean, val summary: String, val detail: String) : AgentEvent
     data class Usage(val usage: com.sufyan.harness.ai.Usage) : AgentEvent
     data class Failed(val error: AiError) : AgentEvent
+    /**
+     * The turn used all [steps] tool steps it was allowed. This is a pause, not an error: the work
+     * done so far is real and the turn can be continued (automatically, if the user asked for that).
+     */
+    data class StepLimit(val steps: Int) : AgentEvent
     /** §20/§47 — the result of a real verification command run after the model finished editing. */
     data class Verified(val command: String, val ok: Boolean, val attempt: Int, val output: String) : AgentEvent
     data object TurnFinished : AgentEvent
@@ -170,15 +175,9 @@ class Agent(
             return@flow
         }
 
-        emit(
-            AgentEvent.Failed(
-                AiError(
-                    "Agent stopped",
-                    "The agent reached its $maxIterations step limit for one turn. Review the changes so far and send a follow-up instruction.",
-                    false,
-                ),
-            ),
-        )
+        // Not a failure: everything done so far is real. The caller decides whether to continue,
+        // and with `agentAutoContinue` on it does so by itself instead of stopping at a wall.
+        emit(AgentEvent.StepLimit(maxIterations))
         emit(AgentEvent.TurnFinished)
     }
 

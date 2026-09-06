@@ -22,6 +22,15 @@ object CloudBuild {
 
     const val WORKFLOW_FILE = "sufyan-harness-build.yml"
 
+    /** Second workflow: runs one shell command in the repository and returns its real output. */
+    const val COMMAND_WORKFLOW_PATH = ".github/workflows/sufyan-harness-command.yml"
+
+    const val COMMAND_WORKFLOW_FILE = "sufyan-harness-command.yml"
+
+    const val COMMAND_ARTIFACT = "sufyan-harness-command-log"
+
+    const val COMMAND_LOG_FILE = "command-output.txt"
+
     /** How long to follow a run before giving up and telling the user to check GitHub. */
     const val TIMEOUT_MS = 30 * 60 * 1000L
 
@@ -86,6 +95,64 @@ object CloudBuild {
                   if-no-files-found: error
     """.trimIndent() + "\n"
 
+    /**
+     * The command workflow. Android cannot install `apt`/`npm`/`pip` packages — an app targeting a
+     * modern API level may not execute binaries from its own data directory, and this build ships no
+     * PRoot loader — so instead of pretending, the command runs on a real Ubuntu machine that has
+     * node, npm, python, java, git and `sudo apt-get`, inside the user's own repository.
+     *
+     * The command is passed through an environment variable, never interpolated into the shell
+     * line, so the workflow file itself cannot be broken (or exploited) by an odd command string.
+     */
+    fun commandWorkflowYaml(): String = """
+        # Added by Sufyan Harness so the app can run commands on a real Linux machine.
+        # It runs exactly the command you type in the app's terminal, in this repository.
+        name: Sufyan Harness cloud command
+
+        on:
+          workflow_dispatch:
+            inputs:
+              command:
+                description: Shell command to run in the repository
+                required: true
+                type: string
+
+        jobs:
+          run:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+
+              - uses: actions/setup-node@v4
+                with:
+                  node-version: '20'
+
+              - uses: actions/setup-java@v4
+                with:
+                  distribution: temurin
+                  java-version: '17'
+
+              - name: Run the command
+                env:
+                  HARNESS_COMMAND: ${'$'}{{ inputs.command }}
+                run: |
+                  set -o pipefail
+                  echo "${'$'} ${'$'}HARNESS_COMMAND" | tee -a $COMMAND_LOG_FILE
+                  bash -lc "${'$'}HARNESS_COMMAND" 2>&1 | tee -a $COMMAND_LOG_FILE
+                  code=${'$'}?
+                  echo "" | tee -a $COMMAND_LOG_FILE
+                  echo "exit code: ${'$'}code" | tee -a $COMMAND_LOG_FILE
+                  exit ${'$'}code
+
+              - name: Upload the output
+                if: always()
+                uses: actions/upload-artifact@v4
+                with:
+                  name: $COMMAND_ARTIFACT
+                  path: $COMMAND_LOG_FILE
+                  if-no-files-found: warn
+    """.trimIndent() + "\n"
+
     /** Artifact name the workflow uploads for [variant]. */
     fun artifactName(variant: String): String = "sufyan-harness-${normalise(variant)}-apk"
 
@@ -135,7 +202,14 @@ object CloudBuild {
      * Entries are resolved against [destDir] and rejected if they escape it (zip-slip), and the
      * extraction stops at [maxBytes] so a hostile or corrupt archive cannot fill the device.
      */
-    fun extractApk(zip: File, destDir: File, maxBytes: Long = 300L * 1024 * 1024): Result<File> = runCatching {
+    fun extractApk(zip: File, destDir: File, maxBytes: Long = 300L * 1024 * 1024): Result<File> =
+        extractFirst(zip, destDir, ".apk", maxBytes)
+
+    /** Same, for the command log the cloud terminal brings back. */
+    fun extractLog(zip: File, destDir: File): Result<File> =
+        extractFirst(zip, destDir, ".txt", 8L * 1024 * 1024)
+
+    private fun extractFirst(zip: File, destDir: File, suffix: String, maxBytes: Long): Result<File> = runCatching {
         destDir.mkdirs()
         val canonicalDest = destDir.canonicalPath
         var found: File? = null
@@ -144,7 +218,7 @@ object CloudBuild {
             while (true) {
                 val entry = zis.nextEntry ?: break
                 val name = entry.name.substringAfterLast('/')
-                if (entry.isDirectory || !name.endsWith(".apk", true)) {
+                if (entry.isDirectory || !name.endsWith(suffix, true)) {
                     zis.closeEntry(); continue
                 }
                 val out = File(destDir, name)
@@ -166,7 +240,7 @@ object CloudBuild {
                 break
             }
         }
-        found ?: throw java.io.IOException("The artifact contained no .apk file.")
+        found ?: throw java.io.IOException("The artifact contained no $suffix file.")
     }
 }
 
@@ -183,6 +257,17 @@ data class CloudRun(
 data class CloudStep(val name: String, val status: String?, val conclusion: String?)
 
 data class CloudArtifact(val id: Long, val name: String, val sizeBytes: Long)
+
+/** One cloud command: what was asked, what really came back. */
+data class CloudCommandState(
+    val running: Boolean = false,
+    val command: String = "",
+    val phase: String = "",
+    val output: List<String> = emptyList(),
+    val exitCode: Int? = null,
+    val runUrl: String? = null,
+    val error: String? = null,
+)
 
 /** Everything the Build screen needs to render the cloud path honestly. */
 data class CloudBuildState(

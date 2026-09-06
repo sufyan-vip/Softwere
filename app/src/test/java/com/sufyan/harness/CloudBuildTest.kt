@@ -151,4 +151,42 @@ class CloudBuildTest {
         assertTrue(result.isFailure)
         assertTrue(result.exceptionOrNull()!!.message!!.contains("larger than"))
     }
+
+    // ---- cloud command (the terminal's way out of Android's package problem) ----
+
+    @Test
+    fun `the command workflow takes a command and always returns its output`() {
+        val yaml = CloudBuild.commandWorkflowYaml()
+        assertTrue(yaml.contains("workflow_dispatch"))
+        assertTrue(yaml.contains("command:"))
+        assertTrue(yaml.contains("required: true"))
+        // The command must reach bash through an env var, never spliced into the YAML itself.
+        assertTrue(yaml.contains("HARNESS_COMMAND: ${'$'}{{ inputs.command }}"))
+        assertTrue(yaml.contains("bash -lc \"${'$'}HARNESS_COMMAND\""))
+        // The log is uploaded even when the command fails — that is exactly when it is needed.
+        assertTrue(yaml.contains("if: always()"))
+        assertTrue(yaml.contains(CloudBuild.COMMAND_ARTIFACT))
+        assertTrue(yaml.contains("exit code:"))
+    }
+
+    @Test
+    fun `the command workflow provides the tools a phone cannot`() {
+        val yaml = CloudBuild.commandWorkflowYaml()
+        assertTrue(yaml.contains("setup-node"))
+        assertTrue(yaml.contains("setup-java"))
+    }
+
+    @Test
+    fun `the command log is extracted from its artifact`() {
+        val zip = zipWith(CloudBuild.COMMAND_LOG_FILE to "$ npm -v\n10.8.2\n\nexit code: 0\n".toByteArray())
+        val log = CloudBuild.extractLog(zip, File(temp.root, "log")).getOrThrow()
+        assertTrue(log.readText().contains("10.8.2"))
+        assertTrue(log.readText().contains("exit code: 0"))
+    }
+
+    @Test
+    fun `an artifact without a log is refused`() {
+        val zip = zipWith("something.bin" to ByteArray(3))
+        assertTrue(CloudBuild.extractLog(zip, File(temp.root, "log2")).isFailure)
+    }
 }

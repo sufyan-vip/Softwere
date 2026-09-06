@@ -138,6 +138,20 @@ class Settings(context: Context) {
         set(v) = prefs.edit().putBoolean(AGENT_COMMANDS, v).apply()
 
     /** §47 — how many build→fix→build cycles the agent may attempt on its own. */
+    /**
+     * §18 — how many tool steps one agent turn may use. It is a budget, not a wall: when it runs
+     * out the turn pauses with everything it has done so far intact, and [agentAutoContinue]
+     * decides whether the next stretch starts by itself.
+     */
+    var agentMaxSteps: Int
+        get() = prefs.getInt(AGENT_MAX_STEPS, 12)
+        set(v) = prefs.edit().putInt(AGENT_MAX_STEPS, v.coerceIn(4, 100)).apply()
+
+    /** Resume automatically when a turn runs out of steps (bounded, and always visible in the log). */
+    var agentAutoContinue: Boolean
+        get() = prefs.getBoolean(AGENT_AUTO_CONTINUE, true)
+        set(v) = prefs.edit().putBoolean(AGENT_AUTO_CONTINUE, v).apply()
+
     var buildFixAttempts: Int
         get() = prefs.getInt(BUILD_FIX_ATTEMPTS, 3)
         set(v) = prefs.edit().putInt(BUILD_FIX_ATTEMPTS, v.coerceIn(0, 6)).apply()
@@ -194,6 +208,8 @@ class Settings(context: Context) {
         const val TERM_HISTORY = "terminal_history"
         const val AGENT_PERMISSION = "agent_permission"
         const val AGENT_COMMANDS = "agent_commands_enabled"
+        const val AGENT_MAX_STEPS = "agent_max_steps"
+        const val AGENT_AUTO_CONTINUE = "agent_auto_continue"
         const val BUILD_FIX_ATTEMPTS = "build_fix_attempts"
         const val CONTEXT_BUDGET = "context_budget"
         const val NOTIFY_TASKS = "notify_tasks"

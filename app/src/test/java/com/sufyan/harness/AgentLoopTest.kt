@@ -179,4 +179,54 @@ class AgentLoopTest {
         val failed = events.filterIsInstance<AgentEvent.Failed>().single()
         assertTrue(failed.error.detail.contains("step limit"))
     }
+
+    @Test
+    fun `running out of steps is a pause, not a failure`() = runTest {
+        // A model that keeps asking for tools forever: the loop must stop, but honestly.
+        val provider = object : AiProvider {
+            override val displayName = "Loop"
+            override suspend fun listModels(force: Boolean): Result<List<ModelInfo>> = Result.success(emptyList())
+            override fun stream(
+                model: String,
+                messages: List<ChatMessage>,
+                tools: List<ToolSchema>,
+                temperature: Float,
+            ): Flow<StreamEvent> = flow {
+                emit(writeCall("loop${messages.size}.txt", "x"))
+                emit(StreamEvent.Done)
+            }
+        }
+        val agent = Agent(provider, AgentTools(files, root, commandsEnabled = false), maxIterations = 3)
+        val events = agent.run("m", mutableListOf(ChatMessage("user", "go")), 0.2f).toList()
+
+        val limit = events.filterIsInstance<AgentEvent.StepLimit>().singleOrNull()
+        assertTrue("the turn must report the step limit", limit != null)
+        assertEquals(3, limit!!.steps)
+        assertFalse("a step limit is not an error", events.any { it is AgentEvent.Failed })
+        assertTrue(events.last() is AgentEvent.TurnFinished)
+        // The work it managed to do is real and still on disk.
+        assertTrue(root.listFiles()!!.any { it.name.startsWith("loop") })
+    }
+
+    @Test
+    fun `a bigger step budget really allows more steps`() = runTest {
+        var calls = 0
+        val provider = object : AiProvider {
+            override val displayName = "Loop"
+            override suspend fun listModels(force: Boolean): Result<List<ModelInfo>> = Result.success(emptyList())
+            override fun stream(
+                model: String,
+                messages: List<ChatMessage>,
+                tools: List<ToolSchema>,
+                temperature: Float,
+            ): Flow<StreamEvent> = flow {
+                calls++
+                emit(writeCall("step$calls.txt", "x"))
+                emit(StreamEvent.Done)
+            }
+        }
+        Agent(provider, AgentTools(files, root, commandsEnabled = false), maxIterations = 7)
+            .run("m", mutableListOf(ChatMessage("user", "go")), 0.2f).toList()
+        assertEquals(7, calls)
+    }
 }

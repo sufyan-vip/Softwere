@@ -52,6 +52,8 @@ fun SettingsScreen(
     var permission by remember { mutableStateOf(s.agentPermission) }
     var commandsEnabled by remember { mutableStateOf(s.agentCommandsEnabled) }
     var buildFixAttempts by remember { mutableIntStateOf(s.buildFixAttempts) }
+    var agentSteps by remember { mutableIntStateOf(s.agentMaxSteps) }
+    var autoContinue by remember { mutableStateOf(s.agentAutoContinue) }
     var contextBudget by remember { mutableIntStateOf(s.contextBudget) }
     var notifyDone by remember { mutableStateOf(s.notifyOnTaskComplete) }
     var termShell by remember { mutableStateOf(s.terminalShell) }
@@ -232,6 +234,35 @@ fun SettingsScreen(
                         enabled = fallbackModel != s.fallbackModelId,
                     )
                 }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Agent steps per turn",
+                    "$agentSteps tool steps before the turn pauses. Raise it for long tasks.",
+                    icon = Icons.Default.Bolt,
+                    trailing = {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            IconButton(onClick = {
+                                val v = (agentSteps - 4).coerceAtLeast(4); agentSteps = v; s.agentMaxSteps = v
+                            }) { Icon(Icons.Default.Remove, contentDescription = "Fewer steps") }
+                            IconButton(onClick = {
+                                val v = (agentSteps + 4).coerceAtMost(100); agentSteps = v; s.agentMaxSteps = v
+                            }) { Icon(Icons.Default.Add, contentDescription = "More steps") }
+                        }
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Continue automatically",
+                    if (autoContinue) {
+                        "When a turn runs out of steps it resumes by itself, up to 5 times, and says so in the chat."
+                    } else {
+                        "A turn that runs out of steps waits for you to tap Continue."
+                    },
+                    icon = Icons.Default.PlayArrow,
+                    trailing = {
+                        Switch(checked = autoContinue, onCheckedChange = { autoContinue = it; s.agentAutoContinue = it })
+                    },
+                )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 StepperRow("Build-fix attempts", buildFixAttempts) {
                     val v = it.coerceIn(1, 10); buildFixAttempts = v; s.buildFixAttempts = v

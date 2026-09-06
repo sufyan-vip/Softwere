@@ -8,12 +8,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.*
@@ -21,6 +23,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,6 +66,10 @@ fun TerminalScreen(vm: HarnessViewModel, onOpenRuntime: () -> Unit = {}) {
     var historyIndex by remember { mutableIntStateOf(-1) }
     var showHistory by remember { mutableStateOf(false) }
     var showHealth by remember { mutableStateOf(false) }
+    // §21-§28 — commands can run on this device, or on a real Linux machine through GitHub Actions
+    // when the tool you need simply cannot exist on Android.
+    var cloudMode by remember { mutableStateOf(false) }
+    val cloudCmd by vm.cloudCommandState.collectAsState()
     val listState = rememberLazyListState()
     val fontSize = vm.settings.terminalFontSize.sp
     val wrap = vm.settings.terminalWordWrap
@@ -72,7 +79,12 @@ fun TerminalScreen(vm: HarnessViewModel, onOpenRuntime: () -> Unit = {}) {
     fun submit(value: String) {
         val cmd = value.trim()
         if (cmd.isEmpty()) return
-        if (cmd == "clear") vm.clearTerminal() else vm.runCommand(cmd)
+        when {
+            cmd == "clear" && cloudMode -> vm.clearCloudCommand()
+            cmd == "clear" -> vm.clearTerminal()
+            cloudMode -> vm.runCloudCommand(cmd)
+            else -> vm.runCommand(cmd)
+        }
         input = ""
         historyIndex = -1
     }
@@ -87,6 +99,13 @@ fun TerminalScreen(vm: HarnessViewModel, onOpenRuntime: () -> Unit = {}) {
                 if (busy) {
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(Spacing.sm))
+                }
+                IconButton(onClick = { cloudMode = !cloudMode }) {
+                    Icon(
+                        if (cloudMode) Icons.Default.Cloud else Icons.Outlined.Cloud,
+                        contentDescription = if (cloudMode) "Run commands on this device" else "Run commands in the cloud",
+                        tint = if (cloudMode) HarnessColors.Accent else LocalContentColor.current,
+                    )
                 }
                 IconButton(onClick = { showHealth = true; vm.inspectEnvironment() }) {
                     Icon(Icons.Outlined.MonitorHeart, contentDescription = "Environment health")
@@ -106,6 +125,15 @@ fun TerminalScreen(vm: HarnessViewModel, onOpenRuntime: () -> Unit = {}) {
             }
         } else {
             Column(Modifier.weight(1f).background(HarnessColors.Base)) {
+                if (cloudMode) {
+                    CloudTerminalPanel(
+                        state = cloudCmd,
+                        modifier = Modifier.weight(1f),
+                        onStop = { vm.stopFollowingCloudCommand() },
+                        onClear = { vm.clearCloudCommand() },
+                    )
+                    return@Column
+                }
                 // §26 — one tab per real process.
                 if (sessions.isNotEmpty()) {
                     Row(
@@ -269,10 +297,15 @@ fun TerminalScreen(vm: HarnessViewModel, onOpenRuntime: () -> Unit = {}) {
                         value = input,
                         onValueChange = { input = it },
                         modifier = Modifier.weight(1f),
-                        placeholder = { Text("Enter command", style = MonoStyle) },
+                        placeholder = {
+                            Text(
+                                if (cloudMode) "Command to run on GitHub (Ubuntu)" else "Enter command",
+                                style = MonoStyle,
+                            )
+                        },
                         textStyle = MonoStyle,
                         singleLine = true,
-                        enabled = project != null,
+                        enabled = project != null && !(cloudMode && cloudCmd.running),
                         shape = RoundedCornerShape(Radius.md),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send, autoCorrect = false),
                         keyboardActions = KeyboardActions(onSend = { submit(input) }),
@@ -445,6 +478,86 @@ private fun HealthSheet(report: EnvReport?, scanning: Boolean, onRescan: () -> U
                     style = MonoStyle.copy(fontSize = 10.sp),
                     color = HarnessColors.TextMuted,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * §21-§28 — the cloud terminal.
+ *
+ * It shows exactly three things: what was asked, what GitHub is doing about it right now, and the
+ * real output that came back (exit code included). Nothing is summarised or invented — the text
+ * below is the log file the runner produced.
+ */
+@Composable
+private fun CloudTerminalPanel(
+    state: com.sufyan.harness.runtime.CloudCommandState,
+    modifier: Modifier = Modifier,
+    onStop: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+    Column(modifier.fillMaxWidth().padding(Spacing.md), verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Cloud, contentDescription = null, tint = HarnessColors.Accent, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(Spacing.sm))
+            Text("Cloud shell", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.weight(1f))
+            if (state.running) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+            } else if (state.exitCode != null) {
+                StatusChip(
+                    "exit ${state.exitCode}",
+                    if (state.exitCode == 0) StatusKind.Ok else StatusKind.Error,
+                )
+            }
+        }
+
+        Text(
+            "Android cannot install apt/npm/pip packages inside an app, so commands typed here run in " +
+                "your linked GitHub repository on Ubuntu — node, npm, python, java, git and sudo apt-get " +
+                "are all available there.",
+            style = MaterialTheme.typography.bodySmall,
+            color = HarnessColors.TextSecondary,
+        )
+
+        if (state.command.isNotEmpty()) {
+            Text("$ ${state.command}", style = MonoStyle, color = HarnessColors.Accent)
+        }
+        if (state.phase.isNotEmpty()) {
+            Text(state.phase, style = MaterialTheme.typography.bodySmall, color = HarnessColors.TextSecondary)
+        }
+        state.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = HarnessColors.Danger) }
+
+        if (state.output.isNotEmpty()) {
+            val scroll = rememberScrollState()
+            LaunchedEffect(state.output.size) { scroll.animateScrollTo(scroll.maxValue) }
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(Radius.sm))
+                    .background(HarnessColors.Surface)
+                    .verticalScroll(scroll)
+                    .padding(Spacing.sm),
+            ) {
+                state.output.forEach { line ->
+                    Text(line, style = MonoStyle, color = HarnessColors.TextPrimary, softWrap = true)
+                }
+            }
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+            if (state.running) {
+                SecondaryButton("Stop watching", onStop, Modifier.weight(1f))
+            } else if (state.output.isNotEmpty() || state.error != null) {
+                SecondaryButton("Clear", onClear, Modifier.weight(1f))
+            }
+            state.runUrl?.let { url ->
+                SecondaryButton("Open run", { uriHandler.openUri(url) }, Modifier.weight(1f))
             }
         }
     }
