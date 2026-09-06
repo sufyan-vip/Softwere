@@ -9,10 +9,10 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 | | |
 | --- | --- |
-| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34004002555> |
-| Commit | `2c54e9d` on `arena/01a07329-softwere` — crash fix + cloud build |
-| Release APK | `app-release.apk` — 12 MB (artifact `sufyan-harness-release-apk`, 11,975,630 bytes zipped) |
-| Debug APK | `app-debug.apk` — 18 MB (artifact `sufyan-harness-debug-apk`, 18,360,871 bytes zipped) |
+| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34005358118> |
+| Commit | `HEAD` on `arena/01a07329-softwere` — crash fix, cloud build, cloud shell, agent step budget |
+| Release APK | `app-release.apk` — 12 MB (artifact `sufyan-harness-release-apk`, 11,987,234 bytes zipped) |
+| Debug APK | `app-debug.apk` — 18 MB (artifact `sufyan-harness-debug-apk`, 18,382,876 bytes zipped) |
 | Verification | `PASS: ... is a valid Android package` for both files |
 | Application id | `com.sufyan.harness` (debug variant: `com.sufyan.harness.debug`) |
 | Version | 1.0.0 (versionCode 1) |
@@ -27,8 +27,8 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 A direct, login-free link for the same artifacts (the repository is public):
 
-- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34004002555/sufyan-harness-release-apk.zip>
-- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34004002555/sufyan-harness-debug-apk.zip>
+- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34005358118/sufyan-harness-release-apk.zip>
+- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34005358118/sufyan-harness-debug-apk.zip>
 
 ## What changed since the first APK
 
@@ -54,6 +54,24 @@ dispatched and then followed step by step in the UI; when it succeeds the artifa
 unzipped, checked by `ApkVerifier` (manifest + dex + signature), and only then does it appear in the
 APK list with **Install**. If any of that fails you get the reason and a link to the run — never a
 fake success.
+
+## Terminal packages, honestly
+
+`apt`, `pkg`, `npm -g`, `pip` cannot install anything inside this app, and no build of it can change
+that: an app targeting a modern API level may not execute binaries from its own data directory, and
+this build ships no PRoot loader. So the Terminal has a **cloud shell**: tap the cloud icon in the
+Terminal's top bar and the command you type runs in your linked GitHub repository on Ubuntu — where
+node, npm, python, java, git and `sudo apt-get` all exist — and the real output, exit code included,
+comes back into the app.
+
+## Agent step budget
+
+A turn no longer dies at "12 steps reached":
+
+- **Settings → Agent steps per turn** (4-100, default 12) sets the budget.
+- **Settings → Continue automatically** (on by default) resumes the turn by itself when the budget
+  runs out, up to 5 times, and says so in the chat each time.
+- If it does stop, the message says *paused, not failed*, and the Continue button carries on.
 
 ## Install on a phone
 

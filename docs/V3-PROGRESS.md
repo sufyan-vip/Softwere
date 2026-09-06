@@ -328,3 +328,24 @@ screen as a dead end, the build now happens where a toolchain exists.
   on-device section.
 
 Tests: `CloudBuildTest` (14). Total **139 tests**, green in CI run 34004002555.
+
+## Follow-up — agent step budget and the cloud shell
+
+Two things a real device exposed.
+
+**"Agent reached its 12 step limit"** was hard-coded and reported as a failure. Now:
+`Settings.agentMaxSteps` (4-100, default 12) is passed to `Agent`, the loop emits a dedicated
+`AgentEvent.StepLimit` instead of `AgentEvent.Failed`, and `HarnessViewModel` resumes the same turn
+automatically while `Settings.agentAutoContinue` is on, bounded by `MAX_AUTO_CONTINUE = 5` and
+announced in the chat on every continuation. A turn that really does stop says "paused, not failed".
+
+**Terminal packages** cannot be installed on Android from inside a sandboxed app — an app targeting
+a modern API level may not exec binaries from its data directory, and this build ships no PRoot
+loader. So `runCloudCommand()` runs the typed command in the project's GitHub repository on Ubuntu
+through a second workflow (`.github/workflows/sufyan-harness-command.yml`, command passed via an env
+var so the workflow cannot be injected), follows the run, downloads the log artifact and shows the
+real output and exit code in a cloud panel in the Terminal (cloud icon in the top bar).
+`cloudPrepare()` and `followCloudRun()` are now shared by both cloud build and cloud command.
+
+Tests: `CloudBuildTest` grew to 18, `AgentLoopTest` to 10. Total **145 tests**, green in CI run
+34005358118.
