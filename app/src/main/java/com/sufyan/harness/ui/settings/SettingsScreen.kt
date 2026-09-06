@@ -1,5 +1,6 @@
 package com.sufyan.harness.ui.settings
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -129,10 +130,24 @@ fun SettingsScreen(
                 Column(Modifier.padding(Spacing.lg)) {
                     Text("Endpoint", style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        "Blank uses the OpenRouter default. A compatible endpoint changes where models and completions come from.",
+                        "Blank uses the OpenRouter default. Any OpenAI-compatible provider works — tap one " +
+                            "to fill it in, then paste that provider's own key above and pick one of its models.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(Spacing.sm))
+                    Row(
+                        Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                    ) {
+                        PROVIDER_PRESETS.forEach { preset ->
+                            AssistChip(
+                                onClick = { endpoint = preset.url },
+                                label = { Text(preset.label) },
+                                shape = RoundedCornerShape(Radius.sm),
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(Spacing.sm))
                     OutlinedTextField(
                         value = endpoint,
@@ -144,6 +159,15 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(Spacing.sm))
+                    PROVIDER_PRESETS.firstOrNull { it.url == endpoint.trim() }?.let { preset ->
+                        Text(
+                            "${preset.label}: free tier ${preset.freeTier}. Key from ${preset.keyUrl}. " +
+                                "Example model id: ${preset.exampleModel}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(Spacing.sm))
+                    }
                     SecondaryButton("Save endpoint", { vm.setEndpoint(endpoint) }, enabled = endpoint != s.endpoint)
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
@@ -501,3 +525,49 @@ private fun StepperRow(label: String, value: Int, onChange: (Int) -> Unit) {
         }
     })
 }
+
+/**
+ * OpenAI-compatible providers with a standing free tier, so a user without an OpenRouter balance is
+ * not stuck. The app only fills in the URL — the key and the model id stay the user's choice, and
+ * the quotas below are the providers' own published free limits, not a promise from this app.
+ */
+private data class ProviderPreset(
+    val label: String,
+    val url: String,
+    val freeTier: String,
+    val keyUrl: String,
+    val exampleModel: String,
+)
+
+private val PROVIDER_PRESETS = listOf(
+    ProviderPreset(
+        "OpenRouter", "https://openrouter.ai/api/v1",
+        "~20 req/min, 50 req/day on :free models", "openrouter.ai/keys",
+        "deepseek/deepseek-r1:free",
+    ),
+    ProviderPreset(
+        "Groq", "https://api.groq.com/openai/v1",
+        "~30 req/min, 1000+ req/day, open-weight models", "console.groq.com/keys",
+        "llama-3.3-70b-versatile",
+    ),
+    ProviderPreset(
+        "Gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+        "generous daily quota on Flash models", "aistudio.google.com/apikey",
+        "gemini-2.5-flash",
+    ),
+    ProviderPreset(
+        "Cerebras", "https://api.cerebras.ai/v1",
+        "~1M tokens/day", "cloud.cerebras.ai",
+        "llama-3.3-70b",
+    ),
+    ProviderPreset(
+        "Mistral", "https://api.mistral.ai/v1",
+        "free Experiment tier", "console.mistral.ai/api-keys",
+        "mistral-small-latest",
+    ),
+    ProviderPreset(
+        "GitHub Models", "https://models.github.ai/inference",
+        "free for GitHub accounts, daily request cap", "github.com/settings/tokens",
+        "openai/gpt-4o-mini",
+    ),
+)

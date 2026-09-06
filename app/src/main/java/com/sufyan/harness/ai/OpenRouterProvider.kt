@@ -54,16 +54,23 @@ class OpenRouterProvider(
         .header("HTTP-Referer", REFERER)
         .header("X-Title", TITLE)
 
-    /** Verifies the stored key against OpenRouter. Never echoes the key back. */
+    /**
+     * Verifies the stored key. Never echoes the key back.
+     *
+     * `/auth/key` is an OpenRouter extension, so when the endpoint points at another
+     * OpenAI-compatible provider (Groq, Cerebras, Gemini's compatibility layer, GitHub Models,
+     * a local server...) that route simply does not exist. In that case the key is proved the
+     * portable way instead: an authenticated `GET /models`.
+     */
     suspend fun testConnection(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val key = requireKey()
             val req = Request.Builder().url("${endpoint()}/auth/key").auth(key).get().build()
-            client.newCall(req).execute().use { res ->
+            val openRouter = client.newCall(req).execute().use { res ->
                 when {
-                    res.code == 401 -> throw IOException("Key rejected (401). Check the key is correct and active.")
-                    !res.isSuccessful -> throw IOException("OpenRouter returned HTTP ${res.code}.")
-                    else -> {
+                    res.code == 401 || res.code == 403 ->
+                        throw IOException("Key rejected (${res.code}). Check the key is correct and active.")
+                    res.isSuccessful -> {
                         val body = res.body?.string().orEmpty()
                         val data = runCatching {
                             json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
@@ -72,7 +79,16 @@ class OpenRouterProvider(
                         val usage = data?.get("usage")?.jsonPrimitive?.contentOrNull ?: "0"
                         "Connected. Usage $usage, limit $limit."
                     }
+                    else -> null // not an OpenRouter endpoint - fall through to the portable check
                 }
+            }
+            openRouter ?: run {
+                val models = listModels(force = true).getOrElse {
+                    throw IOException(
+                        "This endpoint answered, but the key could not be verified: ${it.message}",
+                    )
+                }
+                "Connected to ${endpoint()}. ${models.size} model(s) available."
             }
         }
     }
@@ -85,10 +101,22 @@ class OpenRouterProvider(
             }
         }
         runCatching {
-            val req = Request.Builder().url("${endpoint()}/models").get()
-                .header("HTTP-Referer", REFERER).header("X-Title", TITLE).build()
+            // OpenRouter serves /models publicly; every other provider needs the key. Sending it
+            // when it exists keeps both working.
+            val builder = Request.Builder().url("${endpoint()}/models").get()
+                .header("HTTP-Referer", REFERER).header("X-Title", TITLE)
+            secure.apiKey()?.let { builder.header("Authorization", "Bearer $it") }
+            val req = builder.build()
             client.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) throw IOException("Could not load models (HTTP ${res.code}).")
+                if (!res.isSuccessful) {
+                    throw IOException(
+                        when (res.code) {
+                            401, 403 -> "The endpoint rejected the API key (HTTP ${res.code})."
+                            404 -> "No model list at ${endpoint()}/models (HTTP 404). Check the endpoint URL."
+                            else -> "Could not load models (HTTP ${res.code})."
+                        },
+                    )
+                }
                 val arr = json.parseToJsonElement(res.body!!.string()).jsonObject["data"]!!.jsonArray
                 val models = arr.mapNotNull { el ->
                     runCatching {
