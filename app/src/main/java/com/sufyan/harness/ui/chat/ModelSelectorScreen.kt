@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.ai.ModelInfo
+import com.sufyan.harness.ui.components.OfflineBanner
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.Radius
 import com.sufyan.harness.ui.theme.Spacing
@@ -38,6 +39,8 @@ fun ModelSelectorScreen(vm: HarnessViewModel, onBack: () -> Unit) {
     var category by remember { mutableStateOf(Category.All) }
     val current = vm.active.collectAsState().value?.modelId ?: vm.settings.modelId
     val recents = remember { vm.settings.recentModels() }
+
+    val online by vm.online.collectAsState()
 
     LaunchedEffect(Unit) { if (models.isEmpty()) vm.loadModels() }
 
@@ -65,6 +68,14 @@ fun ModelSelectorScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                 IconButton(onClick = { vm.loadModels(force = true) }) { Icon(Icons.Default.Refresh, contentDescription = "Reload models") }
             },
         )
+
+        if (!online && models.isEmpty()) {
+            OfflineBanner(
+                "The model list",
+                modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+                onRetry = { vm.loadModels(force = true) },
+            )
+        }
 
         Column(Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm)) {
             OutlinedTextField(

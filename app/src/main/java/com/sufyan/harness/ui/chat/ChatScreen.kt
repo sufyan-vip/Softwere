@@ -23,6 +23,7 @@ import com.sufyan.harness.AgentPhase
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.UiMessage
 import com.sufyan.harness.ai.ModelInfo
+import com.sufyan.harness.ui.components.OfflineBanner
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.Radius
 import com.sufyan.harness.ui.theme.Spacing
@@ -44,6 +45,7 @@ fun ChatScreen(
     val messages by vm.messages.collectAsState()
     val generating by vm.generating.collectAsState()
     val phase by vm.agentPhase.collectAsState()
+    val approval by vm.pendingApproval.collectAsState()
     val status by vm.agentStatus.collectAsState()
     val models by vm.models.collectAsState()
     var input by remember { mutableStateOf("") }
@@ -69,6 +71,7 @@ fun ChatScreen(
     }
 
     val model = project?.modelId ?: vm.settings.modelId
+    val online by vm.online.collectAsState()
     val previewRunning = vm.devServer?.state?.value?.running == true
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -86,9 +89,22 @@ fun ChatScreen(
                 DropdownMenu(showMenu, onDismissRequest = { showMenu = false }) {
                     DropdownMenuItem(text = { Text("Clear conversation") }, onClick = { vm.clearConversation(); showMenu = false })
                     DropdownMenuItem(text = { Text("Retry last message") }, onClick = { vm.retryLast(); showMenu = false })
+                    DropdownMenuItem(text = { Text("Review AI changes") }, onClick = { onReviewChanges(); showMenu = false })
+                    DropdownMenuItem(
+                        text = { Text("Build & fix until it passes") },
+                        onClick = { vm.buildAndFix(); showMenu = false },
+                    )
                 }
             },
         )
+
+        // §55 — the model call needs the network; everything else on this screen does not.
+        if (!online) {
+            OfflineBanner(
+                "AI chat",
+                modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+            )
+        }
 
         when {
             project == null -> Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -166,6 +182,15 @@ fun ChatScreen(
             onPickModel = onPickModel,
             onSend = { vm.send(input); input = "" },
             onStop = { vm.stopGeneration() },
+        )
+    }
+
+    // §48 — a real permission gate: the tool call is suspended until this is answered.
+    approval?.let { request ->
+        ApprovalDialog(
+            request = request,
+            onAllow = { vm.resolveApproval(true) },
+            onDeny = { vm.resolveApproval(false) },
         )
     }
 
@@ -339,4 +364,59 @@ private fun Composer(
             }
         }
     }
+}
+
+/**
+ * §48 — asks before the agent does something destructive or runs a command.
+ *
+ * It shows the exact target and a preview of the real content/command, so the answer is informed;
+ * denying returns a refusal to the model rather than silently doing it anyway.
+ */
+@Composable
+private fun ApprovalDialog(
+    request: com.sufyan.harness.ai.ApprovalRequest,
+    onAllow: () -> Unit,
+    onDeny: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDeny,
+        icon = {
+            Icon(
+                if (request.destructive) Icons.Default.Warning else Icons.Default.HelpOutline,
+                contentDescription = null,
+                tint = if (request.destructive) com.sufyan.harness.ui.theme.HarnessColors.Warn
+                else MaterialTheme.colorScheme.primary,
+            )
+        },
+        title = { Text(if (request.destructive) "Allow this destructive action?" else "Allow this action?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                Text(request.description, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    request.target,
+                    style = com.sufyan.harness.ui.theme.MonoStyle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (request.preview.isNotBlank()) {
+                    CodeBlock(request.preview.take(600))
+                }
+                Text(
+                    "Tool: ${request.tool}. You can change when you are asked in Settings \u2192 Agent permissions.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onAllow) {
+                Text(
+                    "Allow",
+                    color = if (request.destructive) com.sufyan.harness.ui.theme.HarnessColors.Danger
+                    else MaterialTheme.colorScheme.primary,
+                )
+            }
+        },
+        dismissButton = { TextButton(onClick = onDeny) { Text("Deny") } },
+        containerColor = MaterialTheme.colorScheme.surface,
+    )
 }

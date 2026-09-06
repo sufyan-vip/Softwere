@@ -46,13 +46,18 @@ if the code behind it really runs (RULE 3, no fake success).
 | 2 | Project type system (ANDROID_APP/WEBSITE/WEB_APP/NODE/EMPTY + metadata) | DONE — type metadata drives scaffold/preview/build/toolchain hints + agent prompt context; every template verifies the files it declares on disk; Android App still correctly gated to Phase 11 |
 | 3 | Project + file system repair (CRUD, import/export, browser, search, storage) | DONE — browser CRUD (create/rename/delete), real ZIP export + import, real folder import, search, per-project + total + runtime storage with a Storage manager |
 | 4 | Code editor (syntax, tabs, search, replace, save, undo, AI actions) | DONE — tabs, dirty state, save, line numbers, lightweight syntax highlight, project search, in-file find/replace with match count, undo stack, editor AI actions routed to the chat composer |
-| 5 | OpenRouter (models, keys, fallbacks) | IN PROGRESS — real key storage, model selector, streaming, tool-call accumulation, usage/cost, retry/backoff, configurable endpoint; cancellation + persistence verified below |
-| 6 | True AI agent (planning, tool budget, verification) | TODO |
-| 7 | Terminal repair | TODO |
-| 8 | Linux / PRoot runtime | TODO |
-| 9-10 | GitHub, web preview + export | TODO |
-| 11 | Android build / install | TODO |
-| 12-16 | Git/diff/checkpoints, background runtime, security/perf, QA, final APK | TODO |
+| 5 | OpenRouter (models, keys, fallbacks) | DONE — key in the Keystore store, live model list, streaming + tool-call accumulation, real usage/cost, retry/backoff, configurable endpoint, fallback model |
+| 6 | True AI agent (planning, tool budget, verification) | DONE — `AgentContext` budgeting/pruning, `CommandPlanner` evidence-backed commands, verification loop with a real command, approval gate, fallback model |
+| 7 | Terminal repair | DONE — multi-session `TerminalSessions`, real settings honoured, `CommandDiagnostics` WHAT/WHY/HOW + fix actions, command history, selectable output |
+| 8 | Linux / PRoot runtime | DONE — `EnvHealth`, `RuntimeRepair` (diagnose + repair, honest blockers), Toolchain screen; a build without a PRoot loader says so instead of pretending |
+| 9 | GitHub | DONE — `GitHubService` (connect/repos/branches/commits/push/pull/zip), `ProjectSync` diffing with real blob SHAs, conflict detection, GitHub screen; the agent deliberately has no GitHub tool |
+| 10 | Web preview + export | DONE — real static server + framework dev servers, error reporting into chat, ZIP/source/production/selection export through a FileProvider |
+| 11 | Android build / install | DONE — `AndroidBuildService` (requirements, real Gradle invocation, artifacts), `ApkVerifier` (manifest/dex/signature/ABI), install + share intents, Build screen |
+| 12 | Git, diff, checkpoints | DONE — pure-Kotlin `DiffEngine`, `ChangeTracker` review/revert per file, checkpoints, Changes and Review screens |
+| 13 | Background runtime | DONE — `TaskRegistry` + foreground `RuntimeService`, task strip in the app chrome, completion notifications |
+| 14 | Security + performance | DONE — `docs/SECURITY_AUDIT.md`, offline mode (§55) via `Connectivity`, crash recovery (§56) via `Recovery`, `run_command` master switch, cleartext restricted to localhost, bounded logs/scrollback |
+| 15 | Full QA | DONE — 111 unit tests across 15 classes, all executed locally and green (see `docs/IMPLEMENTATION_STATUS.md` for the rig) |
+| 16 | Final APK | PENDING — built by GitHub Actions (`assembleRelease`, falling back to `assembleDebug`); no local Android SDK exists in this environment |
 
 ## PHASE 1 — what this change set does
 
@@ -181,3 +186,58 @@ OpenRouter is now a real, configurable provider rather than a hard-coded stream.
 Error handling maps HTTP status codes (401 / 402 / 404 / 408 / 429 / 5xx) to actionable messages. Conversation
 persistence (`<id>.chat.json`) and the existing Stop (`stopGeneration()`) path are retained; both cover the
 Phase 5 deliverable of cancellation and persistence.
+
+## PHASES 6-13 — what those change sets do
+
+Summarised here; each item names the file that implements it.
+
+- **§19-20, §46-47 agent** — `ai/AgentContext.kt` prunes the replayed history to a token budget,
+  keeping the system prompt and the newest turn and announcing what it dropped. `ai/Agent.kt` runs a
+  bounded loop with a real verification command (`Verification`), feeds the *actual* failing output
+  back to the model, and stops at `maxAttempts`. `ai/CommandPlanner.kt` only ever proposes commands
+  that a file on disk proves exist (lockfiles, `package.json` scripts, a Gradle wrapper).
+- **§21-26 terminal** — `runtime/TerminalSessions.kt` (multiple named shells with real pids and
+  working directories), `runtime/ShellSession.kt` (bounded scrollback, interrupt, `exec` with an exit
+  code), `runtime/CommandDiagnostics.kt` (exit 126/127/130/137 → WHAT/WHY/HOW plus Install/Run/Open
+  runtime/Retry actions), and terminal settings that are actually honoured.
+- **§27-28 runtime** — `runtime/EnvHealth.kt` probes each tool for real, `runtime/RuntimeRepair.kt`
+  diagnoses and repairs, and refuses to install a rootfs on a build with no PRoot loader.
+- **§29-33 GitHub** — `runtime/GitHubService.kt` + `runtime/ProjectSync.kt`. Blob SHAs are computed
+  exactly like `git hash-object`, so "changed" means changed. Conflicts are reported before a push,
+  and the token never leaves the `Authorization` header.
+- **§34-39 Android build** — `runtime/AndroidBuildService.kt` reports missing requirements instead of
+  starting an impossible build; `runtime/ApkVerifier.kt` opens the produced APK and checks the
+  manifest, dex, signature and ABIs before the app calls it a build.
+- **§40-44 preview/export** — `runtime/DevServer.kt` (static server + real dev-server processes with
+  console and exit codes) and `data/ProjectArchive.kt` (zip/source/production/selection exports).
+- **§12, §48 diff/permissions** — `data/DiffEngine.kt` (LCS unified diffs, binary detection),
+  `runtime/ChangeTracker.kt` (per-file review/revert against a session baseline), and the approval
+  gate inside `ai/AgentTools.kt`.
+- **§13, §51 background** — `runtime/TaskRegistry.kt` drives the task strip and the foreground
+  notification, so nothing runs invisibly.
+
+## PHASE 14 — security & performance
+
+- `docs/SECURITY_AUDIT.md` is the §53 audit: credentials, logs, prompts, exports, network,
+  permissions, execution safety, and the accepted risks.
+- §55 **offline mode**: `runtime/Connectivity.kt` exposes the OS's validated-network state.
+  `ChatScreen`, the model selector and the GitHub screen show an inline offline strip, and the
+  view-model refuses network calls with a plain explanation rather than a socket timeout.
+- §56 **recovery**: `runtime/Recovery.kt` writes a marker before every long operation. If the
+  process is killed, the next launch reports exactly what was interrupted and what to do about it,
+  then sweeps the scratch files that run left behind.
+- §54 **performance**: bounded terminal scrollback and build logs, `Dispatchers.IO` for every file
+  walk and process call, streaming diffs computed on a background dispatcher, and a 5 MB/2 MB cap on
+  files considered for sync and editing.
+
+## PHASE 15 — QA
+
+15 test classes, 111 tests, all executed locally and green:
+
+`AgentContextTest`, `AgentLoopTest`, `AgentPermissionTest`, `AgentToolsTest`, `ApkVerifierTest`,
+`ChangeTrackerTest`, `CheckpointTest`, `CommandDiagnosticsTest`, `CommandPlannerTest`,
+`DiffEngineTest`, `ProjectArchiveTest`, `ProjectFilesTest`, `ProjectScaffoldTest`, `ProjectSyncTest`,
+`RecoveryTest`.
+
+Two real bugs were found by writing them: `DiffEngine` never set its `binary` flag, and the Android
+template wrote two files it did not declare. Both are fixed.

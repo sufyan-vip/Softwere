@@ -3,6 +3,7 @@ package com.sufyan.harness.runtime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,7 +23,32 @@ data class ServerState(
     val url: String = "",
     val kind: String = "",
     val console: List<String> = emptyList(),
-)
+    /** The dev command actually executed, empty for the built-in static server. */
+    val command: String = "",
+    /** Real exit code of the dev process once it has exited; null while it runs. */
+    val exitCode: Int? = null,
+    /** §44 — set only when the server genuinely failed, with the real reason. */
+    val error: String? = null,
+) {
+    /**
+     * §44 — everything the AI needs to fix a broken preview: the command, the exit code and the
+     * tail of the real console output. Never fabricated; empty when nothing failed.
+     */
+    fun errorReport(): String? {
+        if (error == null && (exitCode == null || exitCode == 0)) return null
+        return buildString {
+            append("The preview server failed.\n")
+            if (command.isNotBlank()) append("Command: $command\n")
+            if (exitCode != null) append("Exit code: $exitCode\n")
+            if (error != null) append("Error: $error\n")
+            val tail = console.takeLast(40)
+            if (tail.isNotEmpty()) {
+                append("\nLast output:\n")
+                append(tail.joinToString("\n"))
+            }
+        }
+    }
+}
 
 /**
  * Live preview backend.
@@ -41,6 +67,9 @@ class DevServer(private val projectDir: File) {
 
     private var serverSocket: ServerSocket? = null
     private var process: Process? = null
+
+    /** Remembers how the server was last started so [restart] repeats exactly that (§43). */
+    private var lastStart: Pair<String?, Int>? = null
 
     private fun log(line: String) {
         _state.value = _state.value.copy(console = (_state.value.console + line).takeLast(300))
@@ -72,7 +101,11 @@ class DevServer(private val projectDir: File) {
         socket.reuseAddress = true
         socket.bind(InetSocketAddress("127.0.0.1", port))
         serverSocket = socket
-        _state.value = ServerState(true, port, "http://127.0.0.1:$port", "Static server", listOf("✓ Server running on port $port"))
+        lastStart = null to port
+        _state.value = ServerState(
+            running = true, port = port, url = "http://127.0.0.1:$port", kind = "Static server",
+            console = listOf("✓ Server running on port $port"),
+        )
         scope.launch {
             while (!socket.isClosed) {
                 val client = try { socket.accept() } catch (_: IOException) { break }
@@ -129,19 +162,42 @@ class DevServer(private val projectDir: File) {
             pb.redirectErrorStream(true)
             val p = pb.start()
             process = p
-            _state.value = ServerState(true, preferredPort, "http://127.0.0.1:$preferredPort", "Dev process", listOf("$ $command"))
+            lastStart = command to preferredPort
+            _state.value = ServerState(
+                running = true, port = preferredPort, url = "http://127.0.0.1:$preferredPort",
+                kind = "Dev process", console = listOf("$ $command"), command = command,
+            )
             scope.launch {
                 p.inputStream.bufferedReader().useLines { seq -> seq.forEach { log(it) } }
                 val code = runCatching { p.waitFor() }.getOrDefault(-1)
                 log("Process exited with code $code")
-                _state.value = _state.value.copy(running = false)
+                _state.value = _state.value.copy(
+                    running = false,
+                    exitCode = code,
+                    error = if (code != 0) "The dev process exited with code $code." else null,
+                )
             }
             if (!waitForPort(preferredPort)) {
+                val console = _state.value.console
                 stop()
+                _state.value = _state.value.copy(
+                    error = "Nothing is listening on port $preferredPort.",
+                    console = console,
+                )
                 error("The dev command started but nothing is listening on port $preferredPort. Check the console output.")
             }
             log("✓ Server running on port $preferredPort")
         }.onFailure { log("Could not start dev server: ${it.message}") }
+    }
+
+    /** §43 — restarts with exactly the same configuration the user started last time. */
+    suspend fun restart(): Result<Unit> {
+        val last = lastStart ?: return Result.failure(IllegalStateException("The server has not been started yet."))
+        stop()
+        // Give the socket a moment to be released before rebinding it.
+        delay(300)
+        val (command, port) = last
+        return if (command == null) startStatic(port) else startProcess(command, port)
     }
 
     fun stop() {
@@ -153,6 +209,11 @@ class DevServer(private val projectDir: File) {
     }
 
     fun clearConsole() {
-        _state.value = _state.value.copy(console = emptyList())
+        _state.value = _state.value.copy(console = emptyList(), error = null, exitCode = null)
+    }
+
+    fun dispose() {
+        stop()
+        scope.cancel()
     }
 }

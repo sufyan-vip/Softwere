@@ -35,11 +35,11 @@ enum class ProjectType(
     val requiredTools: List<String> = emptyList(),
 ) {
     AndroidApp(
-        id = "ANDROID_APP", label = "Android App", blurb = "APK / mobile app",
-        template = Template.Empty, canCreate = false,
-        languages = "Kotlin • Gradle",
-        defaultPort = 8080, devCommand = null, runCommand = null, buildCommand = "assembleDebug",
-        requiredTools = listOf("gradle", "java", "git"),
+        id = "ANDROID_APP", label = "Android App", blurb = "Kotlin + Gradle \u2192 APK",
+        template = Template.Android,
+        languages = "Kotlin \u2022 Gradle",
+        defaultPort = 8080, devCommand = null, runCommand = null, buildCommand = "./gradlew assembleDebug",
+        requiredTools = listOf("java", "gradle"),
     ),
     Website(
         id = "WEBSITE", label = "Website", blurb = "HTML / CSS / JS",
@@ -76,6 +76,7 @@ enum class ProjectType(
                 "web" -> ProjectType.Website
                 "node" -> ProjectType.Node
                 "react" -> ProjectType.WebApp
+                "android" -> ProjectType.AndroidApp
                 else -> ProjectType.Empty
             }
     }
@@ -91,6 +92,12 @@ data class Project(
     var modelId: String? = null,
     var previewPort: Int = 5173,
     var type: String = "",
+    /** §29 — "owner/repo" this project is linked to, or null when it is local-only. */
+    var repoFullName: String? = null,
+    /** §29 — branch used for pull/push. */
+    var repoBranch: String? = null,
+    /** §32 — the remote commit this project was last synchronised with; drives conflict detection. */
+    var lastSyncSha: String? = null,
 ) {
     /** Derived, so it is never trusted from disk: [type] may be missing on older projects. */
     val kind: ProjectType get() = ProjectType.from(type, template)
@@ -112,6 +119,22 @@ enum class Template(val id: String, val label: String, val description: String, 
         "react", "React",
         "package.json, index.html, vite.config.js, src/main.jsx, src/App.jsx",
         listOf("package.json", "index.html", "vite.config.js", "src/main.jsx", "src/App.jsx"),
+    ),
+    Android(
+        "android", "Android App",
+        "Gradle project: settings.gradle.kts, app/build.gradle.kts, manifest, MainActivity.kt",
+        listOf(
+            "settings.gradle.kts",
+            "build.gradle.kts",
+            "gradle.properties",
+            "app/build.gradle.kts",
+            "app/src/main/AndroidManifest.xml",
+            "app/src/main/java/com/example/app/MainActivity.kt",
+            "app/src/main/res/values/strings.xml",
+            "app/src/main/res/values/themes.xml",
+            ".gitignore",
+            "README.md",
+        ),
     ),
 }
 
@@ -303,6 +326,151 @@ object ProjectScaffold {
             "vite.config.js" to "import react from '@vitejs/plugin-react';\nexport default { plugins: [react()], server: { host: '127.0.0.1', port: 5173 } };\n",
             "src/main.jsx" to "import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App.jsx';\ncreateRoot(document.getElementById('root')).render(<App />);\n",
             "src/App.jsx" to "export default function App() {\n  return <main><h1>$name</h1></main>;\n}\n",
+        )
+        Template.Android -> androidFiles(name)
+    }
+
+    /** A package id derived from the project name; always a legal Java package. */
+    fun packageFor(name: String): String {
+        val stem = name.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "")
+            .ifEmpty { "app" }
+            .let { if (it.first().isDigit()) "a$it" else it }
+        return "com.example.$stem"
+    }
+
+    /**
+     * §34 — a real, complete Gradle Android project. These are the actual files a Gradle build
+     * consumes; the app does not pretend to have created an Android project without them. The
+     * package directory is fixed at `com/example/app` so [Template.declaredFiles] can be verified,
+     * and the namespace/applicationId are set from the project name.
+     */
+    private fun androidFiles(name: String): Map<String, String> {
+        val pkg = packageFor(name)
+        val label = name.replace("\"", "'")
+        return mapOf(
+            "settings.gradle.kts" to """
+                pluginManagement {
+                    repositories {
+                        google()
+                        mavenCentral()
+                        gradlePluginPortal()
+                    }
+                }
+                dependencyResolutionManagement {
+                    repositories {
+                        google()
+                        mavenCentral()
+                    }
+                }
+                rootProject.name = "${name.replace("\"", "'")}"
+                include(":app")
+            """.trimIndent() + "\n",
+            "build.gradle.kts" to """
+                plugins {
+                    id("com.android.application") version "8.5.2" apply false
+                    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+                }
+            """.trimIndent() + "\n",
+            "gradle.properties" to """
+                org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+                android.useAndroidX=true
+                kotlin.code.style=official
+            """.trimIndent() + "\n",
+            "app/build.gradle.kts" to """
+                plugins {
+                    id("com.android.application")
+                    id("org.jetbrains.kotlin.android")
+                }
+
+                android {
+                    namespace = "$pkg"
+                    compileSdk = 34
+
+                    defaultConfig {
+                        applicationId = "$pkg"
+                        minSdk = 24
+                        targetSdk = 34
+                        versionCode = 1
+                        versionName = "1.0"
+                    }
+
+                    buildTypes {
+                        release {
+                            isMinifyEnabled = false
+                            // Debug-signed so a debug build is always installable; replace with a
+                            // real keystore before publishing.
+                            signingConfig = signingConfigs.getByName("debug")
+                        }
+                    }
+                    compileOptions {
+                        sourceCompatibility = JavaVersion.VERSION_17
+                        targetCompatibility = JavaVersion.VERSION_17
+                    }
+                    kotlinOptions { jvmTarget = "17" }
+                }
+
+                dependencies {
+                    implementation("androidx.core:core-ktx:1.13.1")
+                    implementation("androidx.appcompat:appcompat:1.7.0")
+                    implementation("com.google.android.material:material:1.12.0")
+                }
+            """.trimIndent() + "\n",
+            "app/src/main/AndroidManifest.xml" to """
+                <?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                    <application
+                        android:allowBackup="true"
+                        android:label="@string/app_name"
+                        android:supportsRtl="true"
+                        android:theme="@style/Theme.App">
+                        <activity
+                            android:name="com.example.app.MainActivity"
+                            android:exported="true">
+                            <intent-filter>
+                                <action android:name="android.intent.action.MAIN" />
+                                <category android:name="android.intent.category.LAUNCHER" />
+                            </intent-filter>
+                        </activity>
+                    </application>
+                </manifest>
+            """.trimIndent() + "\n",
+            "app/src/main/java/com/example/app/MainActivity.kt" to """
+                package com.example.app
+
+                import android.os.Bundle
+                import android.widget.TextView
+                import androidx.appcompat.app.AppCompatActivity
+
+                class MainActivity : AppCompatActivity() {
+                    override fun onCreate(savedInstanceState: Bundle?) {
+                        super.onCreate(savedInstanceState)
+                        val text = TextView(this).apply {
+                            text = getString(R.string.hello)
+                            textSize = 22f
+                            setPadding(48, 48, 48, 48)
+                        }
+                        setContentView(text)
+                    }
+                }
+            """.trimIndent() + "\n",
+            "app/src/main/res/values/strings.xml" to """
+                <?xml version="1.0" encoding="utf-8"?>
+                <resources>
+                    <string name="app_name">$label</string>
+                    <string name="hello">$label is running.</string>
+                </resources>
+            """.trimIndent() + "\n",
+            "app/src/main/res/values/themes.xml" to """
+                <?xml version="1.0" encoding="utf-8"?>
+                <resources>
+                    <style name="Theme.App" parent="Theme.Material3.DayNight.NoActionBar" />
+                </resources>
+            """.trimIndent() + "\n",
+            ".gitignore" to "build/\n.gradle/\nlocal.properties\n*.apk\n",
+            "README.md" to "# $name\n\nAndroid app created with Sufyan Harness.\n\n" +
+                "Build it with `./gradlew assembleDebug` (JDK 17, Android SDK and Gradle required) " +
+                "or push it to GitHub and let CI build the APK.\n",
         )
     }
 

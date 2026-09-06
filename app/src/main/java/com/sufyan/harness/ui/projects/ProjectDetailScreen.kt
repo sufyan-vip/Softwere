@@ -12,7 +12,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Difference
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -204,6 +207,27 @@ fun ProjectDetailScreen(
                     subtitle = if (checkpoints.isEmpty()) "No checkpoints yet" else "${checkpoints.size} checkpoints",
                     icon = Icons.Default.PlayArrow,
                     onClick = { vm.open(project); onNavigate(Routes.GIT) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "AI changes",
+                    subtitle = "Diff and revert everything the assistant wrote this session",
+                    icon = Icons.Default.Difference,
+                    onClick = { vm.open(project); onNavigate(Routes.REVIEW) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "GitHub",
+                    subtitle = project.repoFullName?.let { "Linked to $it" } ?: "Not linked to a repository",
+                    icon = Icons.Default.Hub,
+                    onClick = { vm.open(project); onNavigate(Routes.GITHUB) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Build APK",
+                    subtitle = "Check the build requirements on this device and build",
+                    icon = Icons.Default.Android,
+                    onClick = { vm.open(project); onNavigate(Routes.BUILD) },
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow(

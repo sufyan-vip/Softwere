@@ -14,6 +14,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.sufyan.harness.BuildConfig
+import com.sufyan.harness.data.AgentPermission
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.ui.components.*
 import com.sufyan.harness.ui.theme.HarnessColors
@@ -29,6 +30,8 @@ fun SettingsScreen(
     onModels: () -> Unit,
     onToolchains: () -> Unit,
     onStorage: () -> Unit,
+    onGithub: () -> Unit = {},
+    onBuild: () -> Unit = {},
 ) {
     val s = vm.settings
     var keyInput by remember { mutableStateOf("") }
@@ -45,6 +48,18 @@ fun SettingsScreen(
     var temperature by remember { mutableFloatStateOf(s.temperature) }
     var endpoint by remember { mutableStateOf(s.endpoint) }
     var confirmClear by remember { mutableStateOf(false) }
+    var fallbackModel by remember { mutableStateOf(s.fallbackModelId) }
+    var permission by remember { mutableStateOf(s.agentPermission) }
+    var commandsEnabled by remember { mutableStateOf(s.agentCommandsEnabled) }
+    var buildFixAttempts by remember { mutableIntStateOf(s.buildFixAttempts) }
+    var contextBudget by remember { mutableIntStateOf(s.contextBudget) }
+    var notifyDone by remember { mutableStateOf(s.notifyOnTaskComplete) }
+    var termShell by remember { mutableStateOf(s.terminalShell) }
+    var termEnv by remember { mutableStateOf(s.terminalEnv) }
+    var termScrollback by remember { mutableIntStateOf(s.terminalScrollback) }
+    var termClearOnNew by remember { mutableStateOf(s.terminalClearOnNewSession) }
+    var termWrap by remember { mutableStateOf(s.terminalWordWrap) }
+    var historyCount by remember { mutableIntStateOf(s.commandHistory().size) }
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar("Settings", subtitle = "Sufyan Harness ${BuildConfig.VERSION_NAME}")
@@ -148,6 +163,106 @@ fun SettingsScreen(
                 }
             }
 
+            // Agent ------------------------------------------------------------
+            SectionHeader("Agent")
+            HarnessCard(Modifier.padding(horizontal = Spacing.lg)) {
+                Column(Modifier.padding(Spacing.lg)) {
+                    Text("Permissions", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Controls when the agent must ask you before touching the device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    AgentPermission.entries.forEach { p ->
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = permission == p,
+                                onClick = { permission = p; vm.setAgentPermission(p) },
+                            )
+                            Column {
+                                Text(p.label, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    p.blurb,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    title = "Allow commands",
+                    subtitle = if (commandsEnabled) {
+                        "The agent can run real commands in the project directory."
+                    } else {
+                        "run_command is removed from the agent's tools entirely."
+                    },
+                    icon = Icons.Default.Terminal,
+                    trailing = {
+                        Switch(
+                            checked = commandsEnabled,
+                            onCheckedChange = { commandsEnabled = it; vm.setAgentCommandsEnabled(it) },
+                        )
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                Column(Modifier.padding(Spacing.lg)) {
+                    Text("Fallback model", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Used only when the main model is rate-limited or unavailable. The switch is announced in the chat.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    OutlinedTextField(
+                        value = fallbackModel,
+                        onValueChange = { fallbackModel = it },
+                        placeholder = { Text("openai/gpt-4o-mini") },
+                        singleLine = true,
+                        textStyle = MonoStyle,
+                        shape = RoundedCornerShape(Radius.md),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    SecondaryButton(
+                        "Save fallback",
+                        { vm.setFallbackModel(fallbackModel.trim()) },
+                        enabled = fallbackModel != s.fallbackModelId,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                StepperRow("Build-fix attempts", buildFixAttempts) {
+                    val v = it.coerceIn(1, 10); buildFixAttempts = v; s.buildFixAttempts = v
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Context budget",
+                    "$contextBudget tokens before older turns are summarised out",
+                    Icons.Default.DataUsage,
+                    trailing = {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            IconButton(onClick = {
+                                val v = (contextBudget - 4000).coerceAtLeast(4000); contextBudget = v; s.contextBudget = v
+                            }) { Icon(Icons.Default.Remove, contentDescription = "Decrease context budget") }
+                            IconButton(onClick = {
+                                val v = (contextBudget + 4000).coerceAtMost(128000); contextBudget = v; s.contextBudget = v
+                            }) { Icon(Icons.Default.Add, contentDescription = "Increase context budget") }
+                        }
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Notify when a task finishes",
+                    "A notification when a build, install or long command completes in the background",
+                    Icons.Default.Notifications,
+                    trailing = {
+                        Switch(checked = notifyDone, onCheckedChange = { notifyDone = it; s.notifyOnTaskComplete = it })
+                    },
+                )
+            }
+
             // Runtime ----------------------------------------------------------
             SectionHeader("Runtime & toolchains")
             HarnessCard(Modifier.padding(horizontal = Spacing.lg)) {
@@ -157,6 +272,14 @@ fun SettingsScreen(
                     Icons.Default.Construction,
                     trailing = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
                     onClick = onToolchains,
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Android build",
+                    "Check the build requirements on this device and build an APK",
+                    Icons.Default.Android,
+                    trailing = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
+                    onClick = onBuild,
                 )
             }
 
@@ -200,15 +323,100 @@ fun SettingsScreen(
             HarnessCard(Modifier.padding(horizontal = Spacing.lg)) {
                 StepperRow("Font size", termFont) { termFont = it; s.terminalFontSize = it }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                SettingRow("Shell", "/system/bin/sh", Icons.Default.Terminal)
+                SettingRow("Word wrap", icon = Icons.Default.WrapText, trailing = {
+                    Switch(checked = termWrap, onCheckedChange = { termWrap = it; s.terminalWordWrap = it })
+                })
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                SettingRow("History", "${vm.commandHistory.size} commands this session", Icons.Default.History)
+                SettingRow(
+                    "Clear on new session",
+                    "Wipes the visible output whenever a session starts",
+                    Icons.Default.CleaningServices,
+                    trailing = {
+                        Switch(checked = termClearOnNew, onCheckedChange = { termClearOnNew = it; s.terminalClearOnNewSession = it })
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Scrollback",
+                    "$termScrollback lines kept per session",
+                    Icons.Default.UnfoldMore,
+                    trailing = {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            IconButton(onClick = {
+                                val v = (termScrollback - 500).coerceAtLeast(200); termScrollback = v; s.terminalScrollback = v
+                            }) { Icon(Icons.Default.Remove, contentDescription = "Decrease scrollback") }
+                            IconButton(onClick = {
+                                val v = (termScrollback + 500).coerceAtMost(20000); termScrollback = v; s.terminalScrollback = v
+                            }) { Icon(Icons.Default.Add, contentDescription = "Increase scrollback") }
+                        }
+                    },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                Column(Modifier.padding(Spacing.lg)) {
+                    Text("Shell binary", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "The process the terminal actually launches. Change it only if the alternative really exists on this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    OutlinedTextField(
+                        value = termShell,
+                        onValueChange = { termShell = it; s.terminalShell = it },
+                        singleLine = true,
+                        textStyle = MonoStyle,
+                        shape = RoundedCornerShape(Radius.md),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(Spacing.md))
+                    Text("Environment variables", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "One KEY=value per line, applied to every new session.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(Spacing.sm))
+                    OutlinedTextField(
+                        value = termEnv,
+                        onValueChange = { termEnv = it; s.terminalEnv = it },
+                        placeholder = { Text("TERM=xterm-256color") },
+                        minLines = 2,
+                        maxLines = 6,
+                        textStyle = MonoStyle,
+                        shape = RoundedCornerShape(Radius.md),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Command history",
+                    "$historyCount commands remembered on this device",
+                    Icons.Default.History,
+                    trailing = {
+                        TextButton(onClick = { s.clearCommandHistory(); historyCount = 0 }) { Text("Clear") }
+                    },
+                )
             }
 
             // Security ---------------------------------------------------------
             SectionHeader("Security & storage")
             HarnessCard(Modifier.padding(horizontal = Spacing.lg)) {
-                SettingRow("Credentials", if (masked != null) "1 key stored (encrypted)" else "No credentials stored", Icons.Default.Lock)
+                SettingRow(
+                    "Credentials",
+                    listOfNotNull(
+                        masked?.let { "OpenRouter key" },
+                        vm.secure.maskedGithubToken()?.let { "GitHub token" },
+                    ).ifEmpty { listOf("none") }.joinToString(", ") + " \u00b7 encrypted with the Android Keystore",
+                    Icons.Default.Lock,
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "GitHub",
+                    if (vm.githubConnected()) "Connected" else "Not connected",
+                    Icons.Default.Hub,
+                    trailing = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
+                    onClick = onGithub,
+                )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow("Clear all credentials", "Removes stored keys from this device", Icons.Default.LockReset, onClick = { confirmClear = true })
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
@@ -244,7 +452,7 @@ fun SettingsScreen(
     if (confirmClear) {
         ConfirmDialog(
             "Clear all credentials?",
-            "Your OpenRouter API key will be permanently removed from this device. AI features stop working until you add a key again.",
+            "Your OpenRouter API key and GitHub token are permanently removed from this device. AI and GitHub features stop working until you add them again.",
             "Clear",
             destructive = true,
             onConfirm = { vm.secure.clearAll(); masked = null; confirmClear = false; vm.notify("Credentials cleared.") },

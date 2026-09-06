@@ -12,12 +12,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,13 +48,22 @@ fun StorageScreen(vm: HarnessViewModel, onBack: () -> Unit) {
     val projects by vm.projects.collectAsState()
     val runtime by vm.linux.status.collectAsState()
     var confirmClearExports by remember { mutableStateOf(false) }
-    var refreshToken by remember { mutableStateOf(0) }
+    var confirmClearBuild by remember { mutableStateOf(false) }
 
-    val snapshot = remember(projects, refreshToken) { vm.storageSnapshot() }
-    val total = snapshot.projectsTotal + snapshot.runtimeSize + snapshot.exportsSize
+    // Sizes are measured off the main thread and delivered through the ViewModel (§52).
+    val snapshot by vm.storage.collectAsState()
+    LaunchedEffect(projects.size) { vm.refreshStorage() }
+    val total = snapshot.projectsTotal + snapshot.runtimeSize + snapshot.exportsSize + snapshot.buildCacheSize
 
     Column(Modifier.fillMaxSize()) {
-        AppTopBar("Storage", subtitle = "Total ${formatBytes(total)}", onBack = onBack)
+        AppTopBar(
+            "Storage",
+            subtitle = "Total ${formatBytes(total)}",
+            onBack = onBack,
+            actions = {
+                IconButton(onClick = { vm.refreshStorage() }) { Icon(Icons.Default.Refresh, contentDescription = "Recalculate") }
+            },
+        )
         Column(
             Modifier
                 .weight(1f)
@@ -64,6 +76,7 @@ fun StorageScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                     StorageRow("Projects", snapshot.projectsTotal)
                     StorageRow("Linux runtime", snapshot.runtimeSize)
                     StorageRow("Exported archives", snapshot.exportsSize)
+                    StorageRow("Build output & caches", snapshot.buildCacheSize)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     Row {
                         Text("Total", style = MaterialTheme.typography.titleMedium)
@@ -118,10 +131,17 @@ fun StorageScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 SettingRow(
-                    "Clear terminal logs",
-                    "Clears the in-memory terminal buffer. The shell process keeps running.",
+                    "Clear build output & caches",
+                    "Deletes build, .gradle, dist and node_modules/.cache in every project. Source files are untouched.",
                     Icons.Default.DeleteSweep,
-                    onClick = { vm.clearTerminal(); vm.notify("Terminal logs cleared.") },
+                    onClick = { confirmClearBuild = true },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                SettingRow(
+                    "Clear terminal output & history",
+                    "Empties every session buffer and the saved command history. Running shells keep running.",
+                    Icons.Default.DeleteSweep,
+                    onClick = { vm.clearTerminalLogs() },
                 )
             }
 
@@ -139,8 +159,20 @@ fun StorageScreen(vm: HarnessViewModel, onBack: () -> Unit) {
             "Deletes the .zip files this app generated under exports. It does not touch any project.",
             "Clear",
             destructive = true,
-            onConfirm = { vm.clearExports(); confirmClearExports = false; refreshToken++ },
+            onConfirm = { vm.clearExports(); confirmClearExports = false },
             onDismiss = { confirmClearExports = false },
+        )
+    }
+
+    if (confirmClearBuild) {
+        ConfirmDialog(
+            "Clear build output?",
+            "Deletes generated build directories and caches in all projects. Nothing you wrote is removed, " +
+                "but the next build will take longer.",
+            "Clear",
+            destructive = true,
+            onConfirm = { vm.clearBuildCache(); confirmClearBuild = false },
+            onDismiss = { confirmClearBuild = false },
         )
     }
 }

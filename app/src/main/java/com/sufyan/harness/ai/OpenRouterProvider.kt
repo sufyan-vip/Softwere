@@ -273,8 +273,11 @@ class OpenRouterProvider(
                 }
             }
 
-            if (retryAfterMs != null) {
-                delay(retryAfterMs)
+            // Read the value into a local first: `retryAfterMs` is captured by the `use` closure
+            // above, so the compiler cannot smart-cast it to a non-null Long here.
+            val wait = retryAfterMs
+            if (wait != null) {
+                delay(wait)
                 continue
             }
             return@flow

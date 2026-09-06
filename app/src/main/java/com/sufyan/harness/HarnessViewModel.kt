@@ -1,17 +1,21 @@
 package com.sufyan.harness
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sufyan.harness.ai.*
 import com.sufyan.harness.data.*
 import com.sufyan.harness.runtime.*
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -43,6 +47,8 @@ enum class AgentPhase(val label: String, val busy: Boolean = true) {
     Running("Running command"),
     Installing("Installing package"),
     Building("Building"),
+    Verifying("Verifying build"),
+    WaitingApproval("Waiting for your approval"),
     Complete("Complete", false),
     Failed("Failed", false),
     ;
@@ -64,7 +70,30 @@ data class StorageSnapshot(
     val projectsTotal: Long,
     val runtimeSize: Long,
     val exportsSize: Long,
-    val projects: List<Pair<String, Long>>,
+    val buildCacheSize: Long = 0,
+    val projects: List<Pair<String, Long>> = emptyList(),
+)
+
+/** §31 — everything the GitHub screen needs about the active project's link. */
+data class GitHubState(
+    val user: GitHubUser? = null,
+    val repos: List<GitHubRepo> = emptyList(),
+    val branches: List<String> = emptyList(),
+    val commits: List<GitHubCommit> = emptyList(),
+    val status: SyncStatus? = null,
+    val conflicts: List<SyncConflict> = emptyList(),
+    val busy: String? = null,
+    val error: String? = null,
+    val lastResult: String? = null,
+)
+
+/** §36 — build screen state, driven entirely by the real build process. */
+data class BuildState(
+    val environment: BuildEnvironment? = null,
+    val running: Boolean = false,
+    val log: List<String> = emptyList(),
+    val artifacts: List<BuildArtifact> = emptyList(),
+    val outcome: BuildOutcome? = null,
 )
 
 class HarnessViewModel(app: Application) : AndroidViewModel(app) {
@@ -78,6 +107,19 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     val provider get() = application.provider
     val linux get() = application.linux
     val toolchains get() = application.toolchains
+    val github get() = application.github
+    val tasks get() = application.tasks
+    val builder get() = application.builder
+    val envHealth get() = application.envHealth
+    val runtimeRepair get() = application.runtimeRepair
+    val recovery get() = application.recovery
+
+    /** §55 — live connectivity, so network features can explain themselves instead of timing out. */
+    val online get() = application.connectivity.online
+
+    fun isOnline(): Boolean = application.connectivity.currentlyOnline()
+
+    fun offlineReason(feature: String): String = application.connectivity.offlineReason(feature)
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -118,10 +160,33 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     val projectDir: File? get() = _active.value?.let { workspace.projectDir(it) }
     val files: ProjectFiles? get() = projectDir?.let { ProjectFiles(it) }
 
+    /** §56 — operations that were still running when the process was last killed. */
+    private val _interrupted = MutableStateFlow<List<Recovery.Interrupted>>(emptyList())
+    val interrupted = _interrupted.asStateFlow()
+
+    /** Dismisses the recovery notice; the markers are cleared so it is shown exactly once. */
+    fun dismissRecovery() {
+        recovery.clear()
+        _interrupted.value = emptyList()
+    }
+
     init {
         refreshProjects()
+        recoverFromLastRun()
         (provider as? OpenRouterProvider)?.endpointValue = settings.endpoint.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
         settings.lastProjectId?.let { id -> _projects.value.find { it.id == id }?.let { open(it) } }
+    }
+
+    /**
+     * §56 — reads the markers left by a killed process, then removes the scratch files that run
+     * left behind. Nothing is repaired silently: whatever is found is reported to the user.
+     */
+    private fun recoverFromLastRun() {
+        val pending = runCatching { recovery.pending() }.getOrDefault(emptyList())
+        // A preview server never survives the process, so it is expected rather than newsworthy.
+        _interrupted.value = pending.filter { it.operation != Recovery.Operation.Server }
+        recovery.end(Recovery.Operation.Server)
+        runCatching { recovery.sweep(application.cacheDir, workspace.root, exportsDir()) }
     }
 
     fun refreshProjects() { _projects.value = workspace.list() }
@@ -140,7 +205,12 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         _messages.value = loadConversation(project)
         _git.value = null
         _checkpoints.value = emptyList()
+        _changes.value = emptyList()
+        _githubState.value = GitHubState(user = _githubState.value.user, repos = _githubState.value.repos)
+        _buildState.value = BuildState()
+        devServer?.dispose()
         devServer = DevServer(workspace.projectDir(project))
+        changeTracker = ChangeTracker(workspace.projectDir(project))
         refreshGit()
         refreshCheckpoints()
     }
@@ -158,17 +228,31 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         refreshProjects()
     }
 
-    // ---- Phase 3: import / export / storage --------------------------------
+    // ---- Phase 3 / 10: import / export / storage ----------------------------
     /** §41 — zip the active project into <filesDir>/exports and return the file (real bytes). */
-    fun exportProject(): Result<File> {
+    fun exportProject(): Result<File> = exportWith("zip") { dir, dest -> ProjectArchive.exportZip(dir, dest) }
+
+    /** §41 — source only: no node_modules, build or dist directories. */
+    fun exportSourceOnly(): Result<File> = exportWith("source") { dir, dest -> ProjectArchive.exportSource(dir, dest) }
+
+    /** §42 — the production build, only when one really exists on disk. */
+    fun exportProduction(): Result<File> = exportWith("production") { dir, dest -> ProjectArchive.exportProduction(dir, dest) }
+
+    /** §41 — exactly the files the user selected. */
+    fun exportSelection(paths: Collection<String>): Result<File> =
+        exportWith("selection") { dir, dest -> ProjectArchive.exportSelection(dir, dest, paths) }
+
+    private fun exportWith(suffix: String, block: (File, File) -> Result<Unit>): Result<File> {
         val p = _active.value ?: return Result.failure(IllegalStateException("Open a project first."))
         return runCatching {
-            val exports = File(application.filesDir, "exports").apply { mkdirs() }
-            val out = File(exports, "${p.id}.zip")
-            workspace.exportZip(p, out).getOrThrow()
+            val out = File(exportsDir(), "${p.id}-$suffix.zip")
+            block(workspace.projectDir(p), out).getOrThrow()
             out
         }
     }
+
+    /** §42 — is there a production build to export? Checked on disk, never assumed. */
+    fun hasProductionBuild(): Boolean = projectDir?.let { ProjectArchive.productionDir(it) != null } ?: false
 
     fun exportsDir(): File = File(application.filesDir, "exports").apply { mkdirs() }
 
@@ -187,23 +271,66 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     fun importProjectFromFolder(name: String, type: ProjectType, dir: File): Result<Project> =
         workspace.createFromFolder(name, type, dir)
 
+    // §52 — storage is computed off the main thread; the screen observes the result.
+    private val _storage = MutableStateFlow<StorageSnapshot?>(null)
+    val storage = _storage.asStateFlow()
+
+    fun refreshStorage() {
+        viewModelScope.launch {
+            _storage.value = withContext(Dispatchers.IO) { storageSnapshot() }
+        }
+    }
+
     /** §52 — snapshot of storage, aggregated from real directories. */
     fun storageSnapshot(): StorageSnapshot {
         val projects = workspace.list().map { it to workspace.sizeOf(it) }
         val runtime = application.linux.rootfsDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
         val exports = exportsDir().walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        val buildCache = workspace.list().sumOf { p ->
+            listOf("build", ".gradle", "node_modules/.cache", "dist")
+                .map { File(workspace.projectDir(p), it) }
+                .filter { it.isDirectory }
+                .sumOf { d -> d.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
+        }
         return StorageSnapshot(
             projectsTotal = projects.sumOf { it.second },
             runtimeSize = runtime,
             exportsSize = exports,
+            buildCacheSize = buildCache,
             projects = projects.map { (p, s) -> (p.name to s) },
         )
     }
 
-    /** §52 — safe cleanup: does not touch project files. */
+    /** §52 — safe cleanup: does not touch project source files. */
     fun clearExports(): Result<Unit> = runCatching {
         exportsDir().walkTopDown().filter { it.isFile }.forEach { it.delete() }
         notify("Cleared exported archives.")
+        refreshStorage()
+    }
+
+    /** §52 — removes build output only. Source files are never deleted. */
+    fun clearBuildCache(): Result<Unit> = runCatching {
+        var removed = 0L
+        workspace.list().forEach { p ->
+            listOf("build", ".gradle", "dist", "node_modules/.cache").forEach { rel ->
+                val dir = File(workspace.projectDir(p), rel)
+                if (dir.isDirectory) {
+                    removed += dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                    dir.deleteRecursively()
+                }
+            }
+        }
+        notify("Cleared ${removed / (1024 * 1024)} MB of build output. No source file was touched.")
+        refreshStorage()
+    }
+
+    /** §52 — clears terminal buffers and the persisted command history. */
+    fun clearTerminalLogs(): Result<Unit> = runCatching {
+        sessions.info().forEach { sessions.get(it.id)?.clear() }
+        _terminalLines.value = emptyList()
+        commandHistory.clear()
+        settings.clearCommandHistory()
+        notify("Terminal output and history cleared.")
     }
 
     fun renameProject(project: Project, name: String) {
@@ -316,6 +443,16 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     private var agentJob: Job? = null
     private val apiHistory = mutableListOf<ChatMessage>()
 
+    /** §48 — the action currently waiting for the user's decision, if any. */
+    private val _pendingApproval = MutableStateFlow<ApprovalRequest?>(null)
+    val pendingApproval = _pendingApproval.asStateFlow()
+    private var approvalGate: CompletableDeferred<Boolean>? = null
+
+    /** §12 — before/after review of what the agent changed this session. */
+    private var changeTracker: ChangeTracker? = null
+    private val _changes = MutableStateFlow<List<ReviewedChange>>(emptyList())
+    val changes = _changes.asStateFlow()
+
     private fun conversationFile(project: Project) = File(workspace.projectDir(project).parentFile, "${project.id}.chat.json")
 
     private fun loadConversation(project: Project): List<UiMessage> {
@@ -343,6 +480,14 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         persistConversation()
     }
 
+    /** §46 — the commands this project genuinely supports, detected from its own files. */
+    fun planFor(project: Project): ProjectPlan {
+        val dir = workspace.projectDir(project)
+        val entries = (dir.listFiles() ?: emptyArray()).map { it.name }.toSet()
+        val pkg = File(dir, "package.json").takeIf { it.isFile }?.let { runCatching { it.readText() }.getOrNull() }
+        return CommandPlanner.plan(entries, pkg)
+    }
+
     fun send(prompt: String) {
         val project = _active.value ?: return notify("Open a project first.")
         val f = files ?: return
@@ -351,28 +496,73 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
             _messages.value = _messages.value + UiMessage("error", "No OpenRouter API key configured. Add one in Settings → AI, then retry.")
             return
         }
+        // §55 — say "offline" before spending 30 seconds in a socket timeout.
+        if (!isOnline()) {
+            _messages.value = _messages.value + UiMessage(
+                "error",
+                offlineReason("The AI model") + " Reconnect and use Retry last message.",
+            )
+            return
+        }
 
         _messages.value = _messages.value + UiMessage("user", prompt)
         val assistant = UiMessage("assistant", "")
         _messages.value = _messages.value + assistant
         persistConversation()
 
+        val plan = planFor(project)
         if (apiHistory.none { it.role == "system" }) {
             val extra = settings.systemPrompt.trim()
             apiHistory.add(
                 0,
-                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\n" + typeContext(project) + if (extra.isNotEmpty()) "\n\n$extra" else ""),
+                ChatMessage("system", DEFAULT_SYSTEM_PROMPT + "\n\n" + typeContext(project, plan) + if (extra.isNotEmpty()) "\n\n$extra" else ""),
             )
         }
         apiHistory += ChatMessage("user", prompt)
 
-        val tools = AgentTools(f, workspace.projectDir(project), commandsEnabled = true)
-        val agent = Agent(provider, tools)
+        val dir = workspace.projectDir(project)
+        changeTracker?.capture()
+
+        val tools = AgentTools(
+            files = f,
+            projectDir = dir,
+            commandsEnabled = settings.agentCommandsEnabled,
+            permission = settings.agentPermission,
+            approver = { request -> requestApproval(request) },
+            probeFor = { command -> envHealth.probeFor(command, dir, settings.terminalShell) },
+            projectSummary = typeContext(project, plan),
+        )
+
+        // §20/§47 — verification uses a command the planner actually found; when there is none, the
+        // agent simply reports instead of inventing a build step.
+        val verifyCommand = plan.of("build") ?: plan.of("test")
+        val verification = if (settings.buildFixAttempts > 0 && verifyCommand != null &&
+            verifyCommand.command != "(built-in static server)"
+        ) {
+            Verification(
+                command = verifyCommand.command,
+                evidence = verifyCommand.evidence,
+                maxAttempts = settings.buildFixAttempts,
+            ) {
+                val res = ShellSession.exec(verifyCommand.command, dir, 240_000, settings.terminalShell)
+                VerificationResult(res.ok, res.exitCode, res.combined(6000))
+            }
+        } else null
+
+        val agent = Agent(
+            provider = provider,
+            tools = tools,
+            contextBudget = settings.contextBudget,
+            verification = verification,
+            fallbackModel = settings.fallbackModelId,
+        )
         val model = project.modelId ?: settings.modelId
 
         _generating.value = true
         _agentPhase.value = AgentPhase.Thinking
         _agentStatus.value = "Waiting for $model"
+        tasks.start(TASK_AGENT, "AI agent working on ${project.name}", RuntimeTask.Kind.Agent)
+        recovery.begin(Recovery.Operation.AgentTurn, "${project.name}: ${prompt.take(120)}")
         agentJob = viewModelScope.launch {
             try {
                 agent.run(model, apiHistory, settings.temperature).collect { ev ->
@@ -399,6 +589,10 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                                 },
                             )
                         }
+                        is AgentEvent.Verified -> {
+                            _agentStatus.value = if (ev.ok) "Verified with ${ev.command}" else "Verification failed — fixing"
+                            _agentPhase.value = if (ev.ok) AgentPhase.Complete else AgentPhase.Building
+                        }
                         is AgentEvent.Usage -> mutateLast { m -> m.copy(usage = ev.usage) }
                         is AgentEvent.Failed -> {
                             _agentPhase.value = AgentPhase.Failed
@@ -410,44 +604,138 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 _generating.value = false
+                resolveApproval(false)
                 if (_agentPhase.value.busy) _agentPhase.value = AgentPhase.Complete
+                tasks.finish(TASK_AGENT)
+                recovery.end(Recovery.Operation.AgentTurn)
                 workspace.touch(project)
                 refreshProjects()
                 refreshGit()
                 reloadOpenTabs()
                 persistConversation()
+                refreshChanges()
+                if (settings.notifyOnTaskComplete && tools.changedFiles.isNotEmpty()) {
+                    RuntimeService.notifyCompleted(
+                        application,
+                        "AI task finished",
+                        "${tools.changedFiles.size} file(s) changed in ${project.name}.",
+                    )
+                }
             }
         }
     }
 
+    /** §48 — suspends the tool call until the user approves or declines. */
+    private suspend fun requestApproval(request: ApprovalRequest): Boolean {
+        val gate = CompletableDeferred<Boolean>()
+        approvalGate = gate
+        _pendingApproval.value = request
+        _agentPhase.value = AgentPhase.WaitingApproval
+        _agentStatus.value = request.description
+        return gate.await()
+    }
+
+    fun resolveApproval(approved: Boolean) {
+        val gate = approvalGate ?: return
+        approvalGate = null
+        _pendingApproval.value = null
+        gate.complete(approved)
+    }
+
+    /** §48 — turning commands off removes the tool from the schema on the next turn. */
+    fun setAgentCommandsEnabled(enabled: Boolean) {
+        settings.agentCommandsEnabled = enabled
+        notify(if (enabled) "The agent may run commands (subject to your permission mode)." else "The agent can no longer run commands.")
+    }
+
+    fun setAgentPermission(permission: AgentPermission) {
+        settings.agentPermission = permission
+        notify("Agent permission: ${permission.label}")
+    }
+
+    /** §12 — recompute the before/after review of the current session. */
+    fun refreshChanges() {
+        val tracker = changeTracker ?: return
+        viewModelScope.launch {
+            _changes.value = withContext(Dispatchers.IO) { tracker.review() }
+        }
+    }
+
+    fun revertChange(change: ReviewedChange) {
+        val tracker = changeTracker ?: return
+        tracker.revert(change).fold({
+            notify("Reverted ${change.path}")
+            reloadOpenTabs()
+            refreshChanges()
+        }, { notify(it.message ?: "Revert failed") })
+    }
+
+    fun revertAllChanges() {
+        val tracker = changeTracker ?: return
+        tracker.revertAll(_changes.value).fold({
+            notify("Reverted $it file(s) to the state before this session.")
+            reloadOpenTabs()
+            refreshChanges()
+        }, { notify(it.message ?: "Revert failed") })
+    }
+
+    fun acceptChanges() {
+        changeTracker?.accept()
+        _changes.value = emptyList()
+        notify("Changes accepted.")
+    }
+
+    /** §47 — the one-tap "Build & Fix" action. */
+    fun buildAndFix() {
+        val project = _active.value ?: return notify("Open a project first.")
+        val plan = planFor(project)
+        val cmd = plan.of("build") ?: plan.of("test")
+        if (cmd == null) {
+            notify("No build command was detected in this project, so there is nothing to verify.")
+            return
+        }
+        send(
+            "Run the project's real build command `${cmd.command}` (detected from ${cmd.evidence}). " +
+                "If it fails, read the actual error, fix the cause in the code, and build again until it passes " +
+                "or you have tried ${settings.buildFixAttempts} times. Report what you changed.",
+        )
+    }
+
     /**
      * §45 — the agent gets the project's actual type plus the real commands it can run, so it never
-     * invents a build/preview command. Every line is derived from [Project.kind] metadata; a null
-     * command is reported as absent rather than guessed.
+     * invents a build/preview command. Every line is derived from [Project.kind] metadata and from
+     * [CommandPlanner], which only reports commands backed by a file on disk.
      */
-    private fun typeContext(p: Project): String {
+    private fun typeContext(p: Project, plan: ProjectPlan): String {
         val k = p.kind
         return buildString {
             append("Project: ${p.name} (${k.label})")
             append("\nType: ${k.id}")
             if (k.languages.isNotBlank()) append("\nLanguage: ${k.languages}")
-            k.runCommand?.let { append("\nRun: $it") }
-            k.devCommand?.let { append("\nDev server: $it") }
-            k.buildCommand?.let { append("\nBuild: $it") }
+            append("\nDetected stack: ${plan.stack}")
+            if (plan.commands.isEmpty()) {
+                append("\nNo build or run command was detected in this project's files.")
+            } else {
+                plan.commands.forEach { c ->
+                    append("\n${c.kind.replaceFirstChar { ch -> ch.uppercase() }}: ${c.command}   (evidence: ${c.evidence})")
+                }
+            }
+            plan.notes.forEach { append("\nNote: $it") }
             if (k.requiredTools.isNotEmpty()) append("\nRequires: ${k.requiredTools.joinToString(", ")}")
             append("\nPreview port: ${p.previewPort}")
             append(
-                "\nRules for this project: only use run_command for a command that actually appears in " +
-                    "the project files (package.json scripts, build.gradle, etc.). Never guess a command. " +
-                    "After any edit, run the real build or dev command and report the actual output.",
+                "\nRules for this project: only run a command listed above or one you can see in the project " +
+                    "files. Never guess a command. After any edit, run the real build or dev command and report " +
+                    "the actual output.",
             )
         }
     }
 
     /** Maps a tool call onto the state shown in the agent status bar. No guessing, no timers. */
     private fun phaseFor(tool: String, target: String): AgentPhase = when (tool) {
-        "list_files", "read_file", "search" -> AgentPhase.Inspecting
+        "list_files", "read_file", "search", "project_info" -> AgentPhase.Inspecting
         "write_file", "edit_file", "delete_file" -> AgentPhase.Editing
+        "verify" -> AgentPhase.Verifying
         "run_command" -> when {
             listOf("install", "add ", " i ", "i ", "pip ", "apk ").any { target.contains(it) } -> AgentPhase.Installing
             listOf("build", "vite", "webpack", "gradle", "tsc", "assemble").any { target.contains(it) } -> AgentPhase.Building
@@ -463,10 +751,12 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopGeneration() {
+        resolveApproval(false)
         agentJob?.cancel()
         _generating.value = false
         _agentPhase.value = AgentPhase.Idle
         _agentStatus.value = "Stopped by you"
+        tasks.finish(TASK_AGENT)
         notify("Generation stopped.")
     }
 
@@ -493,6 +783,10 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadModels(force: Boolean = false) {
         if (_modelsLoading.value) return
+        if (!isOnline() && _models.value.isEmpty()) {
+            _modelsError.value = offlineReason("The OpenRouter model list")
+            return
+        }
         _modelsLoading.value = true
         _modelsError.value = null
         viewModelScope.launch {
@@ -516,6 +810,12 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         settings.pushRecentModel(id)
         _active.value?.let { p -> p.modelId = id; workspace.update(p); _active.value = p.copy() }
         notify("Model set to $id")
+    }
+
+    /** §5 — the model used automatically when the primary one is unavailable. */
+    fun setFallbackModel(id: String) {
+        settings.fallbackModelId = id
+        notify(if (id.isBlank()) "Fallback model cleared." else "Fallback model set to $id")
     }
 
     // ---- api key ------------------------------------------------------------
@@ -544,89 +844,229 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---- terminal -----------------------------------------------------------
-    private var shell: ShellSession? = null
+    // ---- terminal (§21-§26) -------------------------------------------------
+    val sessions = TerminalSessions()
+    private val _sessionInfo = MutableStateFlow<List<SessionInfo>>(emptyList())
+    val sessionInfo = _sessionInfo.asStateFlow()
+    val activeSessionId = sessions.activeId
+
     private val _terminalLines = MutableStateFlow<List<TermLine>>(emptyList())
     val terminalLines = _terminalLines.asStateFlow()
     private val _shellRunning = MutableStateFlow(false)
     val shellRunning = _shellRunning.asStateFlow()
     private val _shellCwd = MutableStateFlow<String?>(null)
-    /** Where the session was started; `cd` inside the shell is tracked in V3 phase 7. */
+    /** The real working directory, updated from the shell's own `pwd` after every command. */
     val shellCwd = _shellCwd.asStateFlow()
     private val _commandRunning = MutableStateFlow(false)
     /** True only while the shell process itself says it is executing a command. */
     val commandRunning = _commandRunning.asStateFlow()
-    val commandHistory = mutableListOf<String>()
+    /** Seeded from the persisted history (§24) so it survives a restart. */
+    val commandHistory: MutableList<String> = settings.commandHistory().toMutableList()
+
+    /** §23 — explanation of the last failed command, or null when the last one succeeded. */
+    private val _lastDiagnosis = MutableStateFlow<Diagnosis?>(null)
+    val lastDiagnosis = _lastDiagnosis.asStateFlow()
+
+    /** §22 — environment health report. */
+    private val _envReport = MutableStateFlow<EnvReport?>(null)
+    val envReport = _envReport.asStateFlow()
+    private val _envScanning = MutableStateFlow(false)
+    val envScanning = _envScanning.asStateFlow()
+
+    private var sessionWatchers = mutableListOf<Job>()
 
     fun startShell() {
         val dir = projectDir ?: return notify("Open a project first.")
-        if (shell != null) return
-        val s = ShellSession(dir)
-        shell = s
-        s.start().fold(
-            {
-                _shellRunning.value = true
-                _shellCwd.value = dir.absolutePath
+        if (sessions.active?.running?.value == true) return
+        openSession(_active.value?.name ?: "shell")
+    }
+
+    /** §26 — opens an additional session; each one is a separate process. */
+    fun openSession(name: String) {
+        val dir = projectDir ?: return notify("Open a project first.")
+        sessions.open(
+            name = name,
+            workingDir = dir,
+            shell = settings.terminalShell,
+            env = settings.terminalEnvMap(),
+            scrollback = settings.terminalScrollback,
+        ).fold(
+            { _ ->
+                if (settings.terminalClearOnNewSession) _terminalLines.value = emptyList()
+                bindActiveSession()
+                _sessionInfo.value = sessions.info()
+                tasks.start(TASK_SHELL, "Terminal session running", RuntimeTask.Kind.Shell)
             },
-            {
-                shell?.dispose()
-                shell = null
-                _shellRunning.value = false
-                notify(it.message ?: "Shell failed to start.")
-                return
-            },
+            { notify(it.message ?: "Shell failed to start.") },
         )
-        viewModelScope.launch { s.lines.collect { _terminalLines.value = it } }
-        viewModelScope.launch { s.running.collect { _commandRunning.value = it } }
+    }
+
+    fun selectSession(id: String) {
+        sessions.select(id)
+        bindActiveSession()
+        _sessionInfo.value = sessions.info()
+    }
+
+    fun closeSession(id: String) {
+        sessions.close(id)
+        bindActiveSession()
+        _sessionInfo.value = sessions.info()
+        if (sessions.runningCount == 0) tasks.finish(TASK_SHELL)
+    }
+
+    /** Rewires the exposed flows onto whichever session is active. */
+    private fun bindActiveSession() {
+        sessionWatchers.forEach { it.cancel() }
+        sessionWatchers.clear()
+        val s = sessions.active
+        if (s == null) {
+            _terminalLines.value = emptyList()
+            _shellRunning.value = false
+            _commandRunning.value = false
+            _shellCwd.value = null
+            return
+        }
+        sessionWatchers += viewModelScope.launch { s.lines.collect { _terminalLines.value = it } }
+        sessionWatchers += viewModelScope.launch { s.running.collect { _shellRunning.value = it } }
+        sessionWatchers += viewModelScope.launch { s.busy.collect { _commandRunning.value = it } }
+        sessionWatchers += viewModelScope.launch { s.cwd.collect { _shellCwd.value = it } }
+        sessionWatchers += viewModelScope.launch {
+            s.lastCommand.collect { last ->
+                _sessionInfo.value = sessions.info()
+                if (last != null && last.exitCode != 0 && last.command.isNotBlank()) {
+                    diagnose(last.command, last.exitCode, last.stderrTail)
+                } else if (last != null && last.exitCode == 0) {
+                    _lastDiagnosis.value = null
+                }
+            }
+        }
+    }
+
+    /** §23 — probes the real environment and explains the failure. */
+    private fun diagnose(command: String, exitCode: Int, stderr: String) {
+        val dir = projectDir ?: return
+        viewModelScope.launch {
+            val probe = withContext(Dispatchers.IO) { envHealth.probeFor(command, dir, settings.terminalShell) }
+            _lastDiagnosis.value = CommandDiagnostics.diagnose(command, exitCode, stderr, probe = probe)
+        }
+    }
+
+    fun dismissDiagnosis() { _lastDiagnosis.value = null }
+
+    /** §4 — runs the fix the diagnosis offered. Every action does something real. */
+    fun applyFix(action: FixAction) {
+        when (action) {
+            is FixAction.RunCommand -> runCommand(action.command)
+            is FixAction.Retry -> sessions.active?.lastCommand?.value?.command?.let { runCommand(it) }
+            is FixAction.InstallTool -> notify(
+                "${Toolchains.labelFor(action.toolId)} must come from the Linux runtime — open Settings → Toolchains.",
+            )
+            FixAction.OpenRuntime -> notify("Open Settings → Toolchains to install or repair the Linux runtime.")
+        }
     }
 
     fun restartShell() {
-        stopShell()
-        startShell()
+        val id = sessions.activeId.value
+        val name = sessions.active?.name ?: (_active.value?.name ?: "shell")
+        if (id != null) sessions.close(id)
+        openSession(name)
     }
 
     fun runCommand(cmd: String) {
-        if (shell == null) startShell()
+        if (sessions.active == null) startShell()
         commandHistory += cmd
-        shell?.send(cmd)
+        settings.pushCommand(cmd)
+        _lastDiagnosis.value = null
+        sessions.active?.send(cmd)
+        _sessionInfo.value = sessions.info()
     }
 
-    fun interruptShell() = shell?.interrupt() ?: Unit
-    fun clearTerminal() { shell?.clear(); _terminalLines.value = emptyList() }
+    fun interruptShell() = sessions.active?.interrupt() ?: Unit
+
+    fun clearTerminal() {
+        sessions.active?.clear()
+        _terminalLines.value = emptyList()
+    }
 
     fun stopShell() {
-        shell?.dispose()
-        shell = null
+        sessions.closeAll()
+        sessionWatchers.forEach { it.cancel() }
+        sessionWatchers.clear()
         _shellRunning.value = false
         _commandRunning.value = false
         _shellCwd.value = null
+        _sessionInfo.value = emptyList()
+        tasks.finish(TASK_SHELL)
     }
 
-    // ---- toolchains ---------------------------------------------------------
+    /** §22 — runs the real health probes. */
+    fun inspectEnvironment() {
+        if (_envScanning.value) return
+        _envScanning.value = true
+        viewModelScope.launch {
+            _envReport.value = withContext(Dispatchers.IO) {
+                envHealth.inspect(projectDir ?: workspace.root, settings.terminalShell)
+            }
+            _envScanning.value = false
+        }
+    }
+
+    // ---- toolchains / runtime ----------------------------------------------
     private val _tools = MutableStateFlow<List<ToolStatus>>(emptyList())
     val toolStatuses = _tools.asStateFlow()
     private val _toolsScanning = MutableStateFlow(false)
     val toolsScanning = _toolsScanning.asStateFlow()
 
+    private val _runtimeDiagnosis = MutableStateFlow<RuntimeDiagnosis?>(null)
+    val runtimeDiagnosis = _runtimeDiagnosis.asStateFlow()
+    private val _runtimeBusy = MutableStateFlow(false)
+    val runtimeBusy = _runtimeBusy.asStateFlow()
+
     fun scanToolchains() {
         if (_toolsScanning.value) return
         _toolsScanning.value = true
         viewModelScope.launch {
-            _tools.value = toolchains.detectAll(projectDir ?: workspace.root)
+            _tools.value = withContext(Dispatchers.IO) { toolchains.detectAll(projectDir ?: workspace.root) }
             _toolsScanning.value = false
         }
     }
 
     fun refreshRuntime() { viewModelScope.launch { linux.refresh() } }
 
-    // ---- preview ------------------------------------------------------------
+    /** §28 — real diagnostics of the Linux runtime. */
+    fun diagnoseRuntime() {
+        if (_runtimeBusy.value) return
+        _runtimeBusy.value = true
+        viewModelScope.launch {
+            _runtimeDiagnosis.value = withContext(Dispatchers.IO) { runtimeRepair.diagnose() }
+            _runtimeBusy.value = false
+        }
+    }
+
+    /** §28 — performs a repair and reports exactly what it did. */
+    fun repairRuntime(action: RuntimeRepairAction) {
+        if (_runtimeBusy.value) return
+        _runtimeBusy.value = true
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { runtimeRepair.repair(action) }.fold(
+                { notify(it) },
+                { notify(it.message ?: "Repair failed.") },
+            )
+            _runtimeDiagnosis.value = withContext(Dispatchers.IO) { runtimeRepair.diagnose() }
+            linux.refresh()
+            _runtimeBusy.value = false
+        }
+    }
+
+    // ---- preview (§43, §44) -------------------------------------------------
     var devServer: DevServer? = null
         private set
 
     fun startPreviewStatic() {
         val p = _active.value ?: return notify("Open a project first.")
         devServer?.startStatic(p.previewPort)?.onSuccess {
-            RuntimeService.start(application, "Preview server running for ${p.name}")
+            recovery.begin(Recovery.Operation.Server, p.name)
+            tasks.start(TASK_SERVER, "Preview server running for ${p.name}", RuntimeTask.Kind.Server)
         }?.onFailure { notify(it.message ?: "Server failed to start.") }
     }
 
@@ -634,15 +1074,436 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         val p = _active.value ?: return notify("Open a project first.")
         viewModelScope.launch {
             devServer?.startProcess(command, p.previewPort)?.onSuccess {
-                RuntimeService.start(application, "Dev server running for ${p.name}")
+                recovery.begin(Recovery.Operation.Server, command)
+                tasks.start(TASK_SERVER, "Dev server running for ${p.name}", RuntimeTask.Kind.Server)
             }?.onFailure { notify(it.message ?: "Dev server failed.") }
+        }
+    }
+
+    /** §43 — restart uses exactly the configuration that was started before. */
+    fun restartPreview() {
+        viewModelScope.launch {
+            devServer?.restart()?.onFailure { notify(it.message ?: "Restart failed.") }
         }
     }
 
     fun stopPreview() {
         devServer?.stop()
-        RuntimeService.stop(application)
+        tasks.finish(TASK_SERVER)
     }
+
+    /** §44 — hands the real server error to the agent as a normal prompt. */
+    fun askAiToFixPreview() {
+        val report = devServer?.state?.value?.errorReport()
+            ?: return notify("The preview has not reported an error.")
+        setPendingPrompt("The preview failed. Here is the real output:\n\n$report\n\nFind the cause and fix it.")
+        notify("Preview error sent to the AI chat.")
+    }
+
+    // ---- GitHub (§29-§33) ---------------------------------------------------
+    private val _githubState = MutableStateFlow(GitHubState())
+    val githubState = _githubState.asStateFlow()
+
+    private fun githubBusy(label: String?) {
+        _githubState.value = _githubState.value.copy(busy = label, error = null)
+    }
+
+    /** §55 — returns true (and reports it) when a GitHub call cannot possibly succeed offline. */
+    private fun githubOffline(): Boolean {
+        if (isOnline()) return false
+        _githubState.value = _githubState.value.copy(busy = null, error = offlineReason("GitHub"))
+        return true
+    }
+
+    private fun githubFail(t: Throwable) {
+        _githubState.value = _githubState.value.copy(busy = null, error = t.message ?: "GitHub request failed.")
+    }
+
+    fun githubConnected(): Boolean = secure.hasGithubToken()
+
+    fun connectGithub(token: String) {
+        if (githubOffline()) return
+        githubBusy("Verifying token...")
+        viewModelScope.launch {
+            github.connect(token).fold(
+                { user ->
+                    _githubState.value = _githubState.value.copy(user = user, busy = null, lastResult = "Connected as ${user.login}")
+                    loadRepos()
+                },
+                { githubFail(it) },
+            )
+        }
+    }
+
+    fun disconnectGithub() {
+        github.disconnect()
+        _githubState.value = GitHubState()
+        notify("GitHub disconnected and the token deleted.")
+    }
+
+    fun refreshGithubUser() {
+        if (!secure.hasGithubToken()) return
+        viewModelScope.launch {
+            github.me().fold({ _githubState.value = _githubState.value.copy(user = it) }, { githubFail(it) })
+        }
+    }
+
+    fun loadRepos() {
+        if (!secure.hasGithubToken()) return
+        if (githubOffline()) return
+        githubBusy("Loading repositories...")
+        viewModelScope.launch {
+            github.listRepos().fold(
+                { _githubState.value = _githubState.value.copy(repos = it, busy = null) },
+                { githubFail(it) },
+            )
+        }
+    }
+
+    fun createGithubRepo(name: String, private: Boolean) {
+        if (githubOffline()) return
+        githubBusy("Creating repository...")
+        viewModelScope.launch {
+            github.createRepo(name, private, "Created from Sufyan Harness").fold(
+                { repo ->
+                    _githubState.value = _githubState.value.copy(
+                        busy = null,
+                        repos = listOf(repo) + _githubState.value.repos,
+                        lastResult = "Created ${repo.fullName}",
+                    )
+                    _active.value?.let { linkRepo(repo.fullName, repo.defaultBranch) }
+                },
+                { githubFail(it) },
+            )
+        }
+    }
+
+    /** §29 — clone: downloads the branch tree into a brand-new project. */
+    fun cloneRepo(repo: GitHubRepo, branch: String) {
+        if (githubOffline()) return
+        githubBusy("Cloning ${repo.fullName}...")
+        viewModelScope.launch {
+            val tmp = File(application.cacheDir, "clone-${System.currentTimeMillis()}.zip")
+            github.downloadZip(repo.fullName, branch, tmp).fold(
+                { bytes ->
+                    val created = withContext(Dispatchers.IO) { workspace.createFromZip(repo.name, ProjectType.Empty, tmp) }
+                    tmp.delete()
+                    created.fold(
+                        { project ->
+                            val sha = github.headSha(repo.fullName, branch).getOrNull()
+                            // The type is decided from the files that actually arrived (§45).
+                            project.type = detectTypeFromDir(workspace.projectDir(project)).id
+                            project.repoFullName = repo.fullName
+                            project.repoBranch = branch
+                            project.lastSyncSha = sha
+                            workspace.update(project)
+                            refreshProjects()
+                            open(project)
+                            _githubState.value = _githubState.value.copy(
+                                busy = null,
+                                lastResult = "Cloned ${repo.fullName} (${bytes / 1024} KB) into ${project.name}",
+                            )
+                            refreshSync()
+                        },
+                        { githubFail(it) },
+                    )
+                },
+                { tmp.delete(); githubFail(it) },
+            )
+        }
+    }
+
+    /**
+     * §45 — the type of a cloned repository, decided by looking at the files that were actually
+     * downloaded rather than by guessing from the repository name.
+     */
+    private fun detectTypeFromDir(dir: File): ProjectType {
+        val entries = (dir.listFiles() ?: emptyArray()).map { it.name }.toSet()
+        val pkg = File(dir, "package.json").takeIf { it.isFile }?.let { runCatching { it.readText() }.getOrNull() }
+        return when {
+            entries.any { it.startsWith("settings.gradle") } && File(dir, "app/src/main/AndroidManifest.xml").exists() ->
+                ProjectType.AndroidApp
+            pkg != null && (pkg.contains("\"react\"") || pkg.contains("\"vite\"") || pkg.contains("\"next\"")) ->
+                ProjectType.WebApp
+            pkg != null -> ProjectType.Node
+            "index.html" in entries -> ProjectType.Website
+            else -> ProjectType.Empty
+        }
+    }
+
+    /** §29 — links the open project to a repository without downloading anything. */
+    fun linkRepo(fullName: String, branch: String) {
+        val p = _active.value ?: return notify("Open a project first.")
+        p.repoFullName = fullName
+        p.repoBranch = branch
+        workspace.update(p)
+        _active.value = p.copy()
+        refreshProjects()
+        notify("Linked to $fullName ($branch)")
+        refreshSync()
+    }
+
+    fun unlinkRepo() {
+        val p = _active.value ?: return
+        p.repoFullName = null
+        p.repoBranch = null
+        p.lastSyncSha = null
+        workspace.update(p)
+        _active.value = p.copy()
+        notify("Repository unlinked. Nothing was deleted.")
+    }
+
+    /** §31 — compares the working copy with the linked branch using real content hashes. */
+    fun refreshSync() {
+        val p = _active.value ?: return
+        val full = p.repoFullName ?: return
+        val branch = p.repoBranch ?: "main"
+        githubBusy("Comparing with $full...")
+        viewModelScope.launch {
+            val dir = workspace.projectDir(p)
+            val remoteSha = github.headSha(full, branch).getOrNull()
+            github.listTree(full, branch).fold(
+                { remote ->
+                    val status = withContext(Dispatchers.IO) {
+                        ProjectSync.status(ProjectSync.collect(dir), remote, remoteSha, p.lastSyncSha)
+                    }
+                    _githubState.value = _githubState.value.copy(
+                        busy = null,
+                        status = status,
+                        conflicts = ProjectSync.conflicts(status, p.lastSyncSha),
+                    )
+                },
+                { githubFail(it) },
+            )
+            github.listBranches(full).onSuccess { list ->
+                _githubState.value = _githubState.value.copy(branches = list)
+            }
+            github.listCommits(full, branch).onSuccess { list ->
+                _githubState.value = _githubState.value.copy(commits = list)
+            }
+        }
+    }
+
+    /** §29/§31 — a real commit + branch update through the GitHub API. */
+    fun pushProject(message: String, force: Boolean = false) {
+        val p = _active.value ?: return notify("Open a project first.")
+        val full = p.repoFullName ?: return notify("Link this project to a repository first.")
+        val branch = p.repoBranch ?: "main"
+        if (githubOffline()) return
+        githubBusy("Preparing push...")
+        tasks.start(TASK_SYNC, "Pushing ${p.name} to GitHub", RuntimeTask.Kind.Install)
+        viewModelScope.launch {
+            val dir = workspace.projectDir(p)
+            val local = withContext(Dispatchers.IO) { ProjectSync.collect(dir) }
+            val oversized = ProjectSync.oversized(local)
+            val remoteSha = github.headSha(full, branch).getOrNull()
+            val remote = github.listTree(full, branch).getOrElse { emptyList() }
+            val status = withContext(Dispatchers.IO) { ProjectSync.status(local, remote, remoteSha, p.lastSyncSha) }
+            if (status.clean) {
+                _githubState.value = _githubState.value.copy(busy = null, status = status, lastResult = "Nothing to push — the branch already matches.")
+                tasks.finish(TASK_SYNC)
+                return@launch
+            }
+            val payload = withContext(Dispatchers.IO) { ProjectSync.payload(local, status) }
+            github.pushFiles(
+                fullName = full,
+                branch = branch,
+                message = message,
+                files = payload,
+                deletions = status.deleted,
+                expectedSha = p.lastSyncSha ?: remoteSha,
+                force = force,
+                onProgress = { line -> _githubState.value = _githubState.value.copy(busy = line) },
+            ).fold(
+                { outcome ->
+                    when (outcome) {
+                        is PushOutcome.Success -> {
+                            p.lastSyncSha = outcome.commitSha
+                            workspace.update(p)
+                            _active.value = p.copy()
+                            _githubState.value = _githubState.value.copy(
+                                busy = null,
+                                conflicts = emptyList(),
+                                lastResult = "Pushed ${outcome.filesPushed} file(s) as ${outcome.commitSha.take(7)}" +
+                                    if (oversized.isNotEmpty()) " (skipped ${oversized.size} file(s) over 5 MB)" else "",
+                            )
+                            refreshSync()
+                            if (settings.notifyOnTaskComplete) {
+                                RuntimeService.notifyCompleted(application, "Pushed to GitHub", "$full ($branch)")
+                            }
+                        }
+                        is PushOutcome.Rejected -> {
+                            _githubState.value = _githubState.value.copy(
+                                busy = null,
+                                error = outcome.reason + " Pull first, or choose how to resolve the conflict.",
+                                conflicts = ProjectSync.conflicts(status.copy(remoteSha = outcome.remoteSha), p.lastSyncSha),
+                            )
+                        }
+                    }
+                },
+                { githubFail(it) },
+            )
+            tasks.finish(TASK_SYNC)
+        }
+    }
+
+    /** §29 — pull: replaces the working copy with the remote branch, after a safety checkpoint. */
+    fun pullProject() {
+        val p = _active.value ?: return notify("Open a project first.")
+        val full = p.repoFullName ?: return notify("Link this project to a repository first.")
+        val branch = p.repoBranch ?: "main"
+        if (githubOffline()) return
+        githubBusy("Pulling $full...")
+        viewModelScope.launch {
+            // A checkpoint first: pulling overwrites files, so the previous state stays recoverable.
+            checkpointStore?.create("Before pull from $full")
+            val tmp = File(application.cacheDir, "pull-${System.currentTimeMillis()}.zip")
+            github.downloadZip(full, branch, tmp).fold(
+                {
+                    val dir = workspace.projectDir(p)
+                    val result = withContext(Dispatchers.IO) { ProjectArchive.importZip(dir, tmp) }
+                    tmp.delete()
+                    result.fold(
+                        {
+                            p.lastSyncSha = github.headSha(full, branch).getOrNull()
+                            workspace.update(p)
+                            _active.value = p.copy()
+                            reloadOpenTabs()
+                            refreshCheckpoints()
+                            _githubState.value = _githubState.value.copy(busy = null, lastResult = "Pulled $full ($branch).")
+                            refreshSync()
+                        },
+                        { githubFail(it) },
+                    )
+                },
+                { tmp.delete(); githubFail(it) },
+            )
+        }
+    }
+
+    fun createGithubBranch(name: String) {
+        val p = _active.value ?: return
+        val full = p.repoFullName ?: return notify("Link this project to a repository first.")
+        val from = p.repoBranch ?: "main"
+        githubBusy("Creating branch $name...")
+        viewModelScope.launch {
+            github.createBranch(full, name, from).fold(
+                {
+                    p.repoBranch = name
+                    workspace.update(p)
+                    _active.value = p.copy()
+                    _githubState.value = _githubState.value.copy(busy = null, lastResult = "Created and switched to $name")
+                    refreshSync()
+                },
+                { githubFail(it) },
+            )
+        }
+    }
+
+    fun switchGithubBranch(name: String) {
+        val p = _active.value ?: return
+        p.repoBranch = name
+        p.lastSyncSha = null
+        workspace.update(p)
+        _active.value = p.copy()
+        refreshSync()
+    }
+
+    /** §32 — resolve one conflicted file by taking the remote copy; the local one is checkpointed. */
+    fun resolveConflictTakeRemote(path: String) {
+        val p = _active.value ?: return
+        val full = p.repoFullName ?: return
+        val branch = p.repoBranch ?: "main"
+        viewModelScope.launch {
+            github.fetchFile(full, path, branch).fold(
+                { content ->
+                    withContext(Dispatchers.IO) { files?.write(path, content) }
+                    reloadOpenTabs()
+                    notify("$path replaced with the GitHub version.")
+                    refreshSync()
+                },
+                { githubFail(it) },
+            )
+        }
+    }
+
+    /** §32 — keep the local file; it will overwrite the remote one on the next push. */
+    fun resolveConflictKeepLocal(path: String) {
+        _githubState.value = _githubState.value.copy(
+            conflicts = _githubState.value.conflicts.filterNot { it.path == path },
+            lastResult = "Keeping the local version of $path.",
+        )
+    }
+
+    // ---- Android build (§34-§39) -------------------------------------------
+    private val _buildState = MutableStateFlow(BuildState())
+    val buildState = _buildState.asStateFlow()
+
+    fun detectBuildEnvironment() {
+        val dir = projectDir ?: return
+        viewModelScope.launch {
+            val env = builder.detect(dir)
+            _buildState.value = _buildState.value.copy(
+                environment = env,
+                artifacts = withContext(Dispatchers.IO) { builder.artifacts(dir) },
+            )
+        }
+    }
+
+    fun buildApk(variant: String) {
+        val p = _active.value ?: return notify("Open a project first.")
+        val dir = workspace.projectDir(p)
+        if (_buildState.value.running) return
+        _buildState.value = _buildState.value.copy(running = true, log = emptyList(), outcome = null)
+        tasks.start(TASK_BUILD, "Building ${p.name} ($variant)", RuntimeTask.Kind.Build)
+        recovery.begin(Recovery.Operation.Build, "${p.name} ($variant)")
+        viewModelScope.launch {
+            val outcome = builder.build(dir, variant) { line ->
+                _buildState.value = _buildState.value.copy(log = (_buildState.value.log + line).takeLast(500))
+            }
+            _buildState.value = _buildState.value.copy(
+                running = false,
+                outcome = outcome,
+                artifacts = withContext(Dispatchers.IO) { builder.artifacts(dir) },
+            )
+            tasks.finish(TASK_BUILD)
+            recovery.end(Recovery.Operation.Build)
+            if (settings.notifyOnTaskComplete) {
+                val (title, text) = when (outcome) {
+                    is BuildOutcome.Success -> "Build completed" to outcome.artifact.name
+                    is BuildOutcome.Failed -> "Build failed" to outcome.diagnosis.what
+                    is BuildOutcome.Blocked -> "Build blocked" to outcome.requirement.label
+                }
+                RuntimeService.notifyCompleted(application, title, text)
+            }
+        }
+    }
+
+    /** §37 — hands the verified APK to the system installer. */
+    fun installArtifact(artifact: BuildArtifact): Intent? =
+        builder.installIntent(artifact).fold(
+            {
+                // The installer runs in another process; the marker is cleared on the next launch
+                // after the user is told, which is the only honest way to notice a killed install.
+                recovery.begin(Recovery.Operation.Install, artifact.name)
+                it
+            },
+            { notify(it.message ?: "This APK cannot be installed."); null },
+        )
+
+    fun shareArtifact(artifact: BuildArtifact): Intent? =
+        builder.shareIntent(artifact).fold({ it }, { notify(it.message ?: "Share failed."); null })
+
+    fun deleteArtifact(artifact: BuildArtifact) {
+        if (builder.delete(artifact)) {
+            notify("Deleted ${artifact.name}")
+            detectBuildEnvironment()
+        } else {
+            notify("Could not delete ${artifact.name}")
+        }
+    }
+
+    fun canRequestInstall(): Boolean = builder.canRequestInstall()
 
     // ---- git & checkpoints --------------------------------------------------
     private val _git = MutableStateFlow<GitStatus?>(null)
@@ -698,6 +1559,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
             notify("Restored “${cp.label}”.")
             reloadOpenTabs()
             refreshGit()
+            refreshChanges()
         }, { notify(it.message ?: "Restore failed") })
     }
 
@@ -708,6 +1570,15 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         stopShell()
-        devServer?.stop()
+        devServer?.dispose()
+        tasks.clear()
+    }
+
+    private companion object {
+        const val TASK_AGENT = "agent"
+        const val TASK_SERVER = "server"
+        const val TASK_BUILD = "build"
+        const val TASK_SHELL = "shell"
+        const val TASK_SYNC = "sync"
     }
 }

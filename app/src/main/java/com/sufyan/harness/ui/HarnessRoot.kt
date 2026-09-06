@@ -1,6 +1,7 @@
 package com.sufyan.harness.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -18,15 +19,20 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.sufyan.harness.HarnessViewModel
+import com.sufyan.harness.runtime.RuntimeTask
+import com.sufyan.harness.ui.components.TaskStrip
 import com.sufyan.harness.ui.chat.ChatScreen
+import com.sufyan.harness.ui.build.BuildScreen
 import com.sufyan.harness.ui.chat.ModelSelectorScreen
 import com.sufyan.harness.ui.editor.EditorScreen
 import com.sufyan.harness.ui.git.GitScreen
+import com.sufyan.harness.ui.github.GitHubScreen
 import com.sufyan.harness.ui.preview.PreviewScreen
 import com.sufyan.harness.ui.projects.NewProjectScreen
 import com.sufyan.harness.ui.projects.ProjectSettingsScreen
 import com.sufyan.harness.ui.projects.ProjectDetailScreen
 import com.sufyan.harness.ui.projects.ProjectsScreen
+import com.sufyan.harness.ui.review.ReviewScreen
 import com.sufyan.harness.ui.settings.SettingsScreen
 import com.sufyan.harness.ui.settings.ToolchainScreen
 import com.sufyan.harness.ui.settings.StorageScreen
@@ -47,6 +53,9 @@ object Routes {
     const val PROJECT_SETTINGS = "project_settings"
     const val PROJECT_DETAIL = "project_detail"
     const val STORAGE = "storage"
+    const val GITHUB = "github"
+    const val BUILD = "build"
+    const val REVIEW = "review"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector, val selected: ImageVector)
@@ -72,6 +81,39 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
         }
     }
 
+    val tasks by vm.tasks.tasks.collectAsState()
+
+    // §56 — if the process was killed mid-operation, say so once, with what to do next.
+    val interrupted by vm.interrupted.collectAsState()
+    if (interrupted.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { vm.dismissRecovery() },
+            icon = { Icon(Icons.Default.RestartAlt, contentDescription = null) },
+            title = { Text(if (interrupted.size == 1) interrupted.first().title else "Some work was interrupted") },
+            text = {
+                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Sufyan Harness closed while this was running. Nothing was reported as finished, " +
+                            "so here is exactly what was in progress:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    interrupted.forEach { item ->
+                        Column {
+                            Text(item.operation.label, style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                item.message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { vm.dismissRecovery() }) { Text("Got it") } },
+        )
+    }
+
     val backStack by nav.currentBackStackEntryAsState()
     val current = backStack?.destination
     val showBar = TABS.any { t -> current?.hierarchy?.any { it.route == t.route } == true }
@@ -80,6 +122,21 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
+            Column {
+                // §13 — nothing runs invisibly: every registered background task is listed here.
+                TaskStrip(
+                    tasks = tasks,
+                    onStop = { task ->
+                        when (task.kind) {
+                            RuntimeTask.Kind.Server -> vm.stopPreview()
+                            RuntimeTask.Kind.Shell -> vm.stopShell()
+                            RuntimeTask.Kind.Agent -> vm.stopGeneration()
+                            RuntimeTask.Kind.Build, RuntimeTask.Kind.Install -> vm.notify(
+                                "This task cannot be interrupted safely; it will report as soon as it finishes.",
+                            )
+                        }
+                    },
+                )
             if (showBar) {
                 NavigationBar(
                     containerColor = MaterialTheme.colorScheme.surface,
@@ -108,6 +165,7 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                         )
                     }
                 }
+                }
             }
         },
     ) { padding ->
@@ -126,11 +184,13 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                     ChatScreen(
                         vm,
                         onPickModel = { nav.navigate(Routes.MODELS) },
-                        onReviewChanges = { nav.navigate(Routes.GIT) },
+                        onReviewChanges = { nav.navigate(Routes.REVIEW) },
                         onOpenPreview = { nav.navigate(Routes.PREVIEW) },
                     )
                 }
-                composable(Routes.TERMINAL) { TerminalScreen(vm) }
+                composable(Routes.TERMINAL) {
+                    TerminalScreen(vm, onOpenRuntime = { nav.navigate(Routes.TOOLCHAINS) })
+                }
                 composable(Routes.EDITOR) {
                     EditorScreen(
                         vm,
@@ -146,6 +206,8 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                         onModels = { nav.navigate(Routes.MODELS) },
                         onToolchains = { nav.navigate(Routes.TOOLCHAINS) },
                         onStorage = { nav.navigate(Routes.STORAGE) },
+                        onGithub = { nav.navigate(Routes.GITHUB) },
+                        onBuild = { nav.navigate(Routes.BUILD) },
                     )
                 }
                 composable(Routes.NEW_PROJECT) {
@@ -154,7 +216,32 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                 composable(Routes.MODELS) {
                     ModelSelectorScreen(vm, onBack = { nav.popBackStack() })
                 }
-                composable(Routes.PREVIEW) { PreviewScreen(vm, onBack = { nav.popBackStack() }) }
+                composable(Routes.PREVIEW) {
+                    PreviewScreen(
+                        vm,
+                        onBack = { nav.popBackStack() },
+                        onOpenChat = { nav.navigate(Routes.CHAT) },
+                    )
+                }
+                composable(Routes.GITHUB) { GitHubScreen(vm, onBack = { nav.popBackStack() }) }
+                composable(Routes.BUILD) {
+                    BuildScreen(
+                        vm,
+                        onBack = { nav.popBackStack() },
+                        onOpenGithub = { nav.navigate(Routes.GITHUB) },
+                        onOpenRuntime = { nav.navigate(Routes.TOOLCHAINS) },
+                    )
+                }
+                composable(Routes.REVIEW) {
+                    ReviewScreen(
+                        vm,
+                        onBack = { nav.popBackStack() },
+                        onOpenFile = { path ->
+                            vm.openFile(path)
+                            nav.navigate(Routes.EDITOR)
+                        },
+                    )
+                }
                 composable(Routes.GIT) { GitScreen(vm, onBack = { nav.popBackStack() }) }
                 composable(Routes.TOOLCHAINS) { ToolchainScreen(vm, onBack = { nav.popBackStack() }) }
                 composable(Routes.STORAGE) { StorageScreen(vm, onBack = { nav.popBackStack() }) }

@@ -23,7 +23,10 @@ fun ToolchainScreen(vm: HarnessViewModel, onBack: () -> Unit) {
     val statuses by vm.toolStatuses.collectAsState()
     val scanning by vm.toolsScanning.collectAsState()
     val runtime by vm.linux.status.collectAsState()
+    val diagnosis by vm.runtimeDiagnosis.collectAsState()
+    val runtimeBusy by vm.runtimeBusy.collectAsState()
     val project by vm.active.collectAsState()
+    var confirmRepair by remember { mutableStateOf<com.sufyan.harness.runtime.RuntimeRepairAction?>(null) }
     val type = project?.kind
 
     LaunchedEffect(Unit) {
@@ -67,6 +70,58 @@ fun ToolchainScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                     if (runtime.state == RuntimeState.Downloading || runtime.state == RuntimeState.Extracting) {
                         Spacer(Modifier.height(Spacing.sm))
                         LinearProgressIndicator(progress = { runtime.progress }, modifier = Modifier.fillMaxWidth())
+                    }
+                    Spacer(Modifier.height(Spacing.md))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                        SecondaryButton(
+                            "Diagnose",
+                            { vm.diagnoseRuntime() },
+                            enabled = !runtimeBusy,
+                            icon = Icons.Default.MonitorHeart,
+                        )
+                        if (runtimeBusy) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                    diagnosis?.let { d ->
+                        Spacer(Modifier.height(Spacing.md))
+                        Text(
+                            if (d.healthy) "All runtime checks passed." else "Blocked by: ${d.blocker?.label}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (d.healthy) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+                        )
+                        Spacer(Modifier.height(Spacing.xs))
+                        d.checks.forEach { check ->
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(
+                                    if (check.ok) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp).padding(top = 2.dp),
+                                    tint = if (check.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                )
+                                Spacer(Modifier.width(Spacing.sm))
+                                Column {
+                                    Text(check.label, style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        check.detail,
+                                        style = MonoStyle.copy(fontSize = 11.sp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                        if (d.repairs.isNotEmpty()) {
+                            Spacer(Modifier.height(Spacing.sm))
+                            Text("Repairs that work on this device", style = MaterialTheme.typography.labelLarge)
+                            d.repairs.forEach { action ->
+                                SettingRow(
+                                    action.label,
+                                    action.blurb,
+                                    Icons.Default.Handyman,
+                                    onClick = { confirmRepair = action },
+                                )
+                            }
+                        }
                     }
                     if (!vm.linux.prootAvailable()) {
                         Spacer(Modifier.height(Spacing.md))
@@ -154,5 +209,16 @@ fun ToolchainScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                     "requires the Linux runtime.",
             )
         }
+    }
+
+    confirmRepair?.let { action ->
+        ConfirmDialog(
+            action.label,
+            action.blurb + " The result is reported exactly as it happens \u2014 nothing is assumed.",
+            "Run repair",
+            destructive = action == com.sufyan.harness.runtime.RuntimeRepairAction.Reinstall,
+            onConfirm = { vm.repairRuntime(action); confirmRepair = null },
+            onDismiss = { confirmRepair = null },
+        )
     }
 }

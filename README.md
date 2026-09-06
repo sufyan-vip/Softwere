@@ -15,30 +15,32 @@ Create Project → Tell AI what to build → AI inspects → AI edits files → 
 
 | | |
 |---|---|
-| **Projects** | Real workspace on device, templates for Empty / HTML-CSS-JS / Node / React, search, sort, storage stats |
-| **AI Chat** | Streaming replies, stop/retry, tool-activity cards, code blocks, per-project conversations |
-| **AI Agent** | 7 real tools: list, read, write, edit, delete, search, run command — sandboxed to one project |
-| **OpenRouter** | Full model catalogue, searchable selector with categories, per-project model, connection test |
-| **Editor** | File tree, tabs, dirty tracking, syntax highlighting, project-wide search, large-file guard |
-| **Terminal** | Genuine `/system/bin/sh` process, streamed stdout/stderr, exit codes, history, interrupt |
-| **Preview** | Built-in HTTP server on 127.0.0.1 + embedded WebView + console telemetry |
-| **Git** | Status, colourised diff, history, commit — when a `git` binary is present |
-| **Checkpoints** | Full-project snapshots with atomic rollback; works with no git at all |
-| **Security** | API key encrypted with the Android Keystore, masked, never logged |
+| **Projects** | Real workspace on device, typed projects (Android App / Website / Web App / Node / Empty), templates that verify every file they claim, search, sort, storage manager, ZIP + folder import/export |
+| **AI Chat** | Streaming replies, stop/retry, a compact activity timeline instead of card-spam, final-answer layer with the files that changed, per-project conversations, real token usage and cost |
+| **AI Agent** | 7 real tools (list, read, write, edit, delete, search, run command) sandboxed to one project, a token-budgeted context, an approval gate for destructive actions, and a verification loop that re-runs your real build/test command until it passes |
+| **OpenRouter** | Full model catalogue, searchable selector with categories, per-project model, fallback model, configurable endpoint, connection test |
+| **Editor** | File tree, tabs, dirty tracking, syntax highlighting, project-wide search, find/replace, undo, AI actions, large-file guard |
+| **Terminal** | Multiple named sessions on a genuine shell process, streamed stdout/stderr, exit codes, history, interrupt, and WHAT/WHY/HOW diagnostics for a command that fails |
+| **Linux runtime** | PRoot userspace with real probes and a repair flow — and an honest refusal when the build ships no loader |
+| **GitHub** | Connect with a token, browse repos, clone a branch into a project, diff against the remote with real blob SHAs, detect conflicts, commit and push. The agent has no GitHub tool, so it can never push for you |
+| **Android builds** | Detects the requirements, runs the real Gradle build, verifies the produced APK (manifest, dex, signature, ABIs) and hands it to the system installer |
+| **Preview** | Built-in HTTP server on 127.0.0.1 + embedded WebView + console telemetry, framework dev servers, and errors reported straight into the chat |
+| **Review & rollback** | Pure-Kotlin unified diffs, per-file review/revert of everything the AI touched, plus full-project checkpoints with atomic rollback |
+| **Background work** | Every running task is listed in the app chrome with a Stop action and a foreground-service notification |
+| **Offline & recovery** | Network features say "you are offline" instead of timing out, and an interrupted build/install/AI task is reported on the next launch with what to do about it |
+| **Security** | Credentials encrypted with the Android Keystore, masked, never logged — see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) |
+
+Known limitations are listed honestly in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md).
 
 ## Getting the APK
 
-The full CI pipeline lives in `ci/android-workflow.yml`. Activate it once (it could not be
-pushed directly into `.github/workflows/` — see [`ci/README.md`](ci/README.md)):
+The APK is built by GitHub Actions (`.github/workflows/android.yml`), which runs on every push:
+lint → unit tests → `assembleDebug` → `assembleRelease` → APK verification → upload.
 
-```bash
-mkdir -p .github/workflows
-git mv ci/android-workflow.yml .github/workflows/android.yml
-git commit -m "Enable APK build workflow" && git push
-```
-
-Then: **Actions** tab → latest **Build APK** run → **Artifacts** →
+**Actions** tab → latest **Build APK** run → **Artifacts** →
 `sufyan-harness-debug-apk` or `sufyan-harness-release-apk`.
+
+(A copy of the pipeline is kept in `ci/android-workflow.yml`; see [`ci/README.md`](ci/README.md).)
 
 > The release APK is signed with the debug key, because no release keystore is available in
 > this build environment. Replace `signingConfig` in `app/build.gradle.kts` with a real

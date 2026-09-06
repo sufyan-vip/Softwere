@@ -1,7 +1,7 @@
 # Implementation Status
 
 **Sufyan Harness** — AI Development Workspace for Android
-Last updated: 2026-09-05
+Last updated: 2026-09-06
 
 ## Build environment constraint (read this first)
 
@@ -22,45 +22,56 @@ local build succeeded. A JDK 17 (via the `jdk4py` PyPI wheel) and the Kotlin 2.0
 (via the `kotlin-compiler` npm package) **were** obtained and used for the verification
 described below. The APK itself is built by GitHub Actions, which has the Android SDK.
 
-## Verification actually performed locally
+## Verification actually performed locally (V3 rebuild)
+
+No Android SDK exists here, so the rig is: the real Kotlin compiler (2.x via the `kotlin-compiler`
+npm package), a JDK from the `jdk4py` wheel, and a hand-written stub set for the Android framework,
+`kotlinx.coroutines`, `kotlinx.serialization.json` and JUnit. The stubs live outside the repository
+(`/tmp`), so nothing in `app/` is modified to make the check pass.
 
 | Check | Method | Result |
 |---|---|---|
-| Kotlin syntax, all 34 files | `kotlinc` parse of the full source set | PASS — 0 syntax/structural errors |
-| Non-local-return bug in `openFile` | found by `kotlinc` | FIXED |
-| `ProjectFiles` sandbox + IO | compiled standalone and **executed** | 9/9 assertions PASS |
-| `CheckpointStore` create/restore/delete | compiled standalone and **executed** | 9/9 assertions PASS |
+| Whole non-Compose source set (`ai/`, `data/`, `runtime/`, `HarnessViewModel`, `HarnessApp`) | `kotlinc` type-check against the stub rig | **0 errors** |
+| All 15 unit test classes | type-checked **and executed** on the JVM with a reflection runner | **111 / 111 passed** |
+| Compose UI (`ui/**`, `MainActivity`) | static cross-check: every `vm.<member>`, `vm.<service>.<member>` and `project.<field>` referenced from `ui/` must exist on the real class | no unknown members |
+| Manifest | XML parse | valid |
 
-Executed sandbox test output:
+Three real bugs were found and fixed this way, not by guesswork:
+
+1. `ShellSession.send()` returned the wrong type from an `apply` block.
+2. `OpenRouterProvider` lost a smart-cast because a captured `var` was mutated in a closure.
+3. `HarnessViewModel.init` used `commandHistory` before its declaration.
+
+Writing the tests found two more:
+
+4. `DiffEngine` declared a `binary` flag and rendered "Binary file differs", but never actually set
+   it — a binary file was diffed line-by-line. Fixed with a NUL-byte check.
+5. The Android template wrote `.gitignore` and `README.md` without declaring them, breaking the §11
+   "a template only claims what it writes" contract in the opposite direction. Both are declared now.
+
+Executed test summary (last run):
 
 ```
-PASS write
-PASS read round-trip
-PASS traversal blocked
-PASS no escape file written
-PASS search -> a.txt:1: hello world
-PASS tree expansion
-PASS binary rejected
-PASS delete
-PASS create + duplicate guard
+AgentContextTest        8 tests   PASS
+AgentLoopTest           8 tests   PASS
+AgentPermissionTest     9 tests   PASS
+AgentToolsTest          9 tests   PASS
+ApkVerifierTest         8 tests   PASS
+ChangeTrackerTest       9 tests   PASS
+CheckpointTest          2 tests   PASS
+CommandDiagnosticsTest  8 tests   PASS
+CommandPlannerTest     10 tests   PASS
+DiffEngineTest          9 tests   PASS
+ProjectArchiveTest      4 tests   PASS
+ProjectFilesTest        6 tests   PASS
+ProjectScaffoldTest     4 tests   PASS
+ProjectSyncTest         8 tests   PASS
+RecoveryTest            9 tests   PASS
+---- 111 passed, 0 failed ----
 ```
 
-Executed checkpoint test output:
-
-```
-PASS create -> before AI @ 5 Sep, 14:30
-PASS list
-  (simulated bad AI edit applied)
-PASS restore succeeded
-PASS file content restored
-PASS nested file restored
-PASS internal marker not leaked
-PASS no temp dirs left behind
-PASS delete
-```
-
-Compose UI code and Android-framework code cannot be type-checked locally (no Android
-classpath). That happens in CI.
+Compose UI code and Android-framework code still cannot be *compiled* locally (no Compose
+artefacts are reachable offline). That happens in CI.
 
 ## Phase status
 
@@ -158,7 +169,7 @@ These are **not faked** — they probe, and they report unavailability honestly.
 [✓] Toolchain manager           Probe-based, no fake "Installed"
 [✓] Secure credentials          Keystore-backed, masked, never logged
 [✓] Background runtime          Foreground service, visible, stoppable
-[✓] Tests                       3 unit test classes, 17 test methods
+[✓] Tests                       15 unit test classes, 111 test methods, all green locally
 [⏳] Final APK                  Produced and validated by GitHub Actions
 ```
 

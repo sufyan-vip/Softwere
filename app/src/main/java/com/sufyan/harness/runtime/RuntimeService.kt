@@ -65,6 +65,7 @@ class RuntimeService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 42
+        private var eventId = 100
         const val ACTION_STOP = "com.sufyan.harness.STOP_RUNTIME"
         private const val EXTRA_LABEL = "label"
 
@@ -79,6 +80,35 @@ class RuntimeService : Service() {
 
         fun stop(context: Context) {
             context.startService(Intent(context, RuntimeService::class.java).setAction(ACTION_STOP))
+        }
+
+        /**
+         * §51 — a one-shot notification for a finished task. Silently does nothing when the user has
+         * not granted the notification permission; it never pretends to have notified.
+         */
+        fun notifyCompleted(context: Context, title: String, text: String) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!granted) return
+            }
+            val open = PendingIntent.getActivity(
+                context, 2, Intent(context, MainActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val notification = NotificationCompat.Builder(context, HarnessApp.CHANNEL_EVENTS)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setAutoCancel(true)
+                .setContentIntent(open)
+                .build()
+            runCatching {
+                androidx.core.app.NotificationManagerCompat.from(context).notify(eventId++, notification)
+            }
         }
     }
 }

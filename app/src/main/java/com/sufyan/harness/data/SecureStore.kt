@@ -37,10 +37,35 @@ class SecureStore(context: Context) {
     fun hasApiKey(): Boolean = apiKey() != null
 
     /** Never returns more than the first/last few characters. */
-    fun maskedApiKey(): String? {
-        val k = apiKey() ?: return null
-        if (k.length <= 12) return "•".repeat(k.length)
-        return k.take(6) + "•".repeat(8) + k.takeLast(4)
+    fun maskedApiKey(): String? = mask(apiKey())
+
+    // ---- §30: GitHub credentials -------------------------------------------
+    // Same encrypted store, same masking rules. The token is never logged, never placed in a
+    // terminal command line, and never included in anything sent to the AI provider.
+
+    fun githubToken(): String? = prefs.getString(KEY_GITHUB, null)?.takeIf { it.isNotBlank() }
+
+    fun setGithubToken(value: String) {
+        prefs.edit().putString(KEY_GITHUB, value.trim()).apply()
+    }
+
+    fun clearGithubToken() {
+        prefs.edit().remove(KEY_GITHUB).remove(KEY_GITHUB_LOGIN).apply()
+    }
+
+    fun hasGithubToken(): Boolean = githubToken() != null
+
+    fun maskedGithubToken(): String? = mask(githubToken())
+
+    /** The login the token was last verified against — not a secret, but it belongs with the token. */
+    var githubLogin: String?
+        get() = prefs.getString(KEY_GITHUB_LOGIN, null)
+        set(v) = prefs.edit().putString(KEY_GITHUB_LOGIN, v).apply()
+
+    private fun mask(value: String?): String? {
+        val k = value ?: return null
+        if (k.length <= 12) return "\u2022".repeat(k.length)
+        return k.take(6) + "\u2022".repeat(8) + k.takeLast(4)
     }
 
     fun clearAll() {
@@ -49,5 +74,7 @@ class SecureStore(context: Context) {
 
     private companion object {
         const val KEY_OPENROUTER = "openrouter_api_key"
+        const val KEY_GITHUB = "github_token"
+        const val KEY_GITHUB_LOGIN = "github_login"
     }
 }

@@ -37,23 +37,39 @@ app/
       editor/      File tree, tabs, code editor
       preview/     WebView live preview
       git/         Status, diff, history, checkpoints
-      settings/    Global settings, toolchain manager
+      github/      GitHub connect, repos, push/pull, conflicts
+      build/       Android build + APK artifacts
+      review/      Per-file review and revert of AI changes
+      settings/    Global settings, toolchain manager, storage manager
     data/
-      Workspace.kt   Project CRUD on the real filesystem + templates
-      FileTree.kt    Sandboxed file operations (ProjectFiles)
-      SecureStore.kt Keystore-backed credential storage
-      Settings.kt    Non-secret preferences
+      Workspace.kt     Project CRUD on the real filesystem + templates + ProjectScaffold
+      FileTree.kt      Sandboxed file operations (ProjectFiles)
+      SecureStore.kt   Keystore-backed credential storage
+      Settings.kt      Non-secret preferences
+      DiffEngine.kt    Pure-Kotlin LCS unified diff (no git binary needed)
+      ProjectArchive.kt Zip/source/production/selection export + import
     ai/
       AiProvider.kt        Provider-agnostic interface + DTOs
       OpenRouterProvider.kt SSE streaming, error mapping, model list
-      AgentTools.kt        Real tool implementations
-      Agent.kt             Agent loop (model -> tools -> model)
+      AgentTools.kt        Real tool implementations + the §48 approval gate
+      Agent.kt             Agent loop (model -> tools -> verify -> model)
+      AgentContext.kt      Token budgeting and history pruning
+      CommandPlanner.kt    Evidence-backed command detection
     runtime/
       ShellSession.kt  Interactive shell + one-shot exec
       LinuxRuntime.kt  PRoot userspace, resumable install
       Toolchains.kt    Probe-based tool detection
       DevServer.kt     Static HTTP server + dev-process supervision
       GitService.kt    Git wrapper + CheckpointStore
+      ChangeTracker.kt Session baseline, per-file review and revert
+      TerminalSessions.kt Multiple named shells
+      CommandDiagnostics.kt Exit code -> WHAT / WHY / HOW + fix actions
+      EnvHealth.kt / RuntimeRepair.kt  Real probes, honest blockers
+      GitHubService.kt / ProjectSync.kt GitHub REST + blob-SHA diffing
+      AndroidBuildService.kt / ApkVerifier.kt Gradle build + APK validation
+      TaskRegistry.kt  Every background task, drives the task strip
+      Connectivity.kt  §55 offline state
+      Recovery.kt      §56 interrupted-operation markers + scratch sweep
       RuntimeService.kt Foreground service
 ```
 
@@ -111,6 +127,9 @@ execution.
 - Preview console is bounded to 300 lines.
 - Editor refuses files over 2 MB and binary files rather than OOMing.
 - Tool payloads sent back to the model are truncated (12 KB) and in the UI (4 KB).
+- The replayed conversation is pruned to a token budget (`AgentContext`, default 24k) instead of
+  growing without bound.
+- Build logs keep the last 500 lines on screen; project sync skips files over 5 MB.
 
 ## Security posture
 
@@ -124,6 +143,12 @@ execution.
 | Cleartext HTTP | Disabled except for `127.0.0.1`/`localhost` (preview) |
 | Agent blast radius | Tools are constructed against one project directory only |
 | Background work | Foreground service with visible state and a Stop action |
+| GitHub token | Same encrypted store; sent only in an `Authorization` header, never in a command line or URL |
+| Destructive agent actions | Gated in `AgentTools.gate()`; refused outright when no approval channel exists |
+| GitHub from the agent | Impossible by construction — there is no GitHub tool (§33) |
+| Backups | `android:allowBackup="false"`, so the encrypted store cannot be pulled with `adb backup` |
+
+The full §53 audit, including accepted risks, is in [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md).
 
 ## Build and delivery
 

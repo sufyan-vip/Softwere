@@ -344,3 +344,39 @@ fun UnavailableNotice(feature: String, reason: String) {
 fun Dot(color: Color) {
     Box(Modifier.size(8.dp).clip(RoundedCornerShape(Radius.pill)).background(color))
 }
+
+/**
+ * §55 — the offline state for one feature. It is a thin inline strip rather than a full-screen
+ * blocker, because everything local still works while this is showing.
+ */
+@Composable
+fun OfflineBanner(feature: String, modifier: Modifier = Modifier, onRetry: (() -> Unit)? = null) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Radius.md))
+            .background(HarnessColors.Warn.copy(alpha = 0.10f))
+            .border(1.dp, HarnessColors.Warn.copy(alpha = 0.32f), RoundedCornerShape(Radius.md))
+            .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Default.CloudOff,
+            contentDescription = null,
+            tint = HarnessColors.Warn,
+            modifier = Modifier.size(16.dp),
+        )
+        Column(Modifier.weight(1f)) {
+            Text("You are offline", style = MaterialTheme.typography.labelLarge, color = HarnessColors.Warn)
+            Text(
+                "$feature needs a connection. Projects, the editor, local git history and the terminal keep working.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (onRetry != null) {
+            TextButton(onClick = onRetry) { Text("Retry") }
+        }
+    }
+}
