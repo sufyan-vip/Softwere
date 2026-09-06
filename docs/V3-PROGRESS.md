@@ -270,3 +270,41 @@ them could not be seen from the sandbox (there is no Android SDK in it):
 2. `ui/components/AgentUi.kt` used `11.sp` without `import androidx.compose.ui.unit.sp`.
 3. `ui/settings/StorageScreen.kt` read `StorageSnapshot?` as if it were non-null; it now falls back
    to a zeroed snapshot until the first real measurement lands.
+
+## Post-release fix — crash on the second launch
+
+Reported from a device: the app started once, then crashed on every launch afterwards with
+
+```
+java.lang.RuntimeException: Cannot create an instance of class com.sufyan.harness.HarnessViewModel
+Caused by: java.lang.NullPointerException: Attempt to invoke interface method
+  'void kotlinx.coroutines.flow.MutableStateFlow.setValue(java.lang.Object)' on a null object reference
+    at com.sufyan.harness.HarnessViewModel.open(HarnessViewModel.kt:136)
+    at com.sufyan.harness.HarnessViewModel.<init>(HarnessViewModel.kt:122)
+```
+
+**Cause.** `HarnessViewModel`'s `init` block ended with
+`settings.lastProjectId?.let { ... open(it) }`. Kotlin initialises properties in declaration order,
+and `open()` writes `_tabs`, `_activeTab`, `_messages`, `_git`, `_checkpoints`, `_changes`,
+`_githubState` and `_buildState` — every one of them declared *below* the `init` block (lines 344 to
+1519) and therefore still `null` while the constructor runs. The first ever launch has no
+`lastProjectId`, so the branch is skipped and the app works; from the second launch on, the
+constructor throws, `ViewModelProvider` rethrows it as *Cannot create an instance*, and the activity
+dies before any UI exists. Permanent, unrecoverable from the user's side.
+
+**Fix** (`HarnessViewModel`, `data/StartupGuard.kt`, `runtime/CrashLog.kt`, `ui/HarnessRoot.kt`):
+
+1. The `init` block is gone. Start-up is an explicit `vm.start()` that `HarnessRoot` calls from a
+   `LaunchedEffect(Unit)` — after every property exists, and where a failure can be shown.
+2. Each start-up step is individually guarded, and so is `open()`: an unreadable conversation, git
+   directory or dev-server port now degrades that one feature and reports it, instead of throwing.
+3. `StartupGuard` (pure, unit-tested) decides whether the last project may be restored. A marker
+   (`Settings.pendingRestoreId`, written with `commit()`) is set before the restore and cleared
+   after; finding it still set at launch means the previous attempt died, so the project is *not*
+   re-opened and the user is told why. A crash there can never become a crash loop again.
+4. `CrashLog` installs an uncaught-exception handler that writes `time / msg / stacktrace` to
+   `filesDir/crash/last-crash.txt`. The next launch shows it in a dialog with **Copy log**, so the
+   app reports its own crashes instead of the user having to find them in logcat.
+
+Tests: `StartupGuardTest` (6) and `CrashLogTest` (8), including the exact device crash text as a
+parser fixture. Total **125 tests**.

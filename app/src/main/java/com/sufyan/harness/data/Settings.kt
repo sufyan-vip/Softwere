@@ -156,6 +156,16 @@ class Settings(context: Context) {
         get() = prefs.getString(LAST_PROJECT, null)
         set(v) = prefs.edit().putString(LAST_PROJECT, v).apply()
 
+    /**
+     * Set while a project is being restored at launch and cleared as soon as it is open.
+     * If it survives a restart, the previous launch died mid-restore — see [StartupGuard].
+     * `commit()` rather than `apply()`: the value has to be on disk *before* the risky work runs.
+     */
+    var pendingRestoreId: String?
+        get() = prefs.getString(PENDING_RESTORE, null)
+        @Suppress("ApplySharedPref")
+        set(v) { prefs.edit().putString(PENDING_RESTORE, v).commit() }
+
     fun recentModels(): List<String> =
         prefs.getString(RECENT_MODELS, "")!!.split('\n').filter { it.isNotBlank() }
 
@@ -188,6 +198,7 @@ class Settings(context: Context) {
         const val CONTEXT_BUDGET = "context_budget"
         const val NOTIFY_TASKS = "notify_tasks"
         const val LAST_PROJECT = "last_project"
+        const val PENDING_RESTORE = "pending_restore"
         const val RECENT_MODELS = "recent_models"
     }
 }

@@ -113,6 +113,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     val envHealth get() = application.envHealth
     val runtimeRepair get() = application.runtimeRepair
     val recovery get() = application.recovery
+    val crashLog get() = application.crashLog
 
     /** §55 — live connectivity, so network features can explain themselves instead of timing out. */
     val online get() = application.connectivity.online
@@ -164,17 +165,85 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
     private val _interrupted = MutableStateFlow<List<Recovery.Interrupted>>(emptyList())
     val interrupted = _interrupted.asStateFlow()
 
+    /** The uncaught exception that killed the previous run, if there was one. */
+    private val _lastCrash = MutableStateFlow<CrashLog.Report?>(null)
+    val lastCrash = _lastCrash.asStateFlow()
+
+    /** Marks the crash report as read; the file is deleted so it is shown exactly once. */
+    fun dismissCrashReport() {
+        runCatching { crashLog.clear() }
+        _lastCrash.value = null
+    }
+
     /** Dismisses the recovery notice; the markers are cleared so it is shown exactly once. */
     fun dismissRecovery() {
         recovery.clear()
         _interrupted.value = emptyList()
     }
 
-    init {
-        refreshProjects()
-        recoverFromLastRun()
-        (provider as? OpenRouterProvider)?.endpointValue = settings.endpoint.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
-        settings.lastProjectId?.let { id -> _projects.value.find { it.id == id }?.let { open(it) } }
+    /**
+     * Startup work that used to live in an `init` block and crashed the app on every launch after
+     * the first one.
+     *
+     * Two things were wrong with doing this in the constructor. Kotlin initialises properties in
+     * declaration order, so calling [open] from `init` wrote to `_tabs`, `_messages`, `_git`,
+     * `_buildState` and friends while they were still `null` — an immediate
+     * `NullPointerException: ... MutableStateFlow.setValue ... on a null object reference`, which
+     * `ViewModelProvider` rethrows as *Cannot create an instance of class HarnessViewModel*. And
+     * anything that throws in a view model constructor takes the whole activity down before a
+     * single pixel is drawn, so there is no screen left to report the failure on.
+     *
+     * So startup is now an explicit call the UI makes once it is composed, it runs after every
+     * property exists, and every step is individually guarded: a broken project or an unreadable
+     * conversation shows a message and leaves you on the project list (RULE 4).
+     */
+    private var started = false
+
+    fun start() {
+        if (started) return
+        started = true
+        runCatching { refreshProjects() }
+            .onFailure { notify("Could not read the workspace: ${it.message ?: it::class.java.simpleName}") }
+        runCatching { recoverFromLastRun() }
+        _lastCrash.value = runCatching { crashLog.last() }.getOrNull()
+        runCatching {
+            (provider as? OpenRouterProvider)?.endpointValue =
+                settings.endpoint.ifBlank { OpenRouterProvider.DEFAULT_ENDPOINT }
+        }
+        restoreLastProject()
+    }
+
+    /**
+     * Re-opens the project from the previous session, unless [StartupGuard] says that would be
+     * unsafe. The marker written around [open] means a crash here can never become a crash loop.
+     */
+    private fun restoreLastProject() {
+        val decision = StartupGuard.decide(
+            lastProjectId = settings.lastProjectId,
+            pendingRestoreId = settings.pendingRestoreId,
+            knownProjectIds = _projects.value.map { it.id },
+        )
+        when (decision) {
+            is StartupGuard.Decision.None -> Unit
+
+            is StartupGuard.Decision.Skip -> {
+                settings.pendingRestoreId = null
+                settings.lastProjectId = null
+                notify(decision.reason)
+            }
+
+            is StartupGuard.Decision.Open -> {
+                val project = _projects.value.firstOrNull { it.id == decision.projectId } ?: return
+                settings.pendingRestoreId = project.id
+                runCatching { open(project) }
+                    .onFailure {
+                        _active.value = null
+                        settings.lastProjectId = null
+                        notify("Could not open ${project.name}: ${it.message ?: it::class.java.simpleName}")
+                    }
+                settings.pendingRestoreId = null
+            }
+        }
     }
 
     /**
@@ -197,22 +266,31 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
             open(it)
         }
 
+    /**
+     * Opens [project]. Every step that touches disk is guarded on its own: a corrupt conversation
+     * file or an unreadable git directory degrades that one thing and still leaves you with an
+     * open, usable project instead of taking the app down.
+     */
     fun open(project: Project) {
         _active.value = project
         settings.lastProjectId = project.id
         _tabs.value = emptyList()
         _activeTab.value = null
-        _messages.value = loadConversation(project)
+        _messages.value = runCatching { loadConversation(project) }.getOrElse {
+            notify("Previous conversation for ${project.name} could not be read; starting a new one.")
+            emptyList()
+        }
         _git.value = null
         _checkpoints.value = emptyList()
         _changes.value = emptyList()
         _githubState.value = GitHubState(user = _githubState.value.user, repos = _githubState.value.repos)
         _buildState.value = BuildState()
-        devServer?.dispose()
-        devServer = DevServer(workspace.projectDir(project))
-        changeTracker = ChangeTracker(workspace.projectDir(project))
-        refreshGit()
-        refreshCheckpoints()
+        runCatching { devServer?.dispose() }
+        val dir = workspace.projectDir(project)
+        devServer = runCatching { DevServer(dir) }.getOrNull()
+        changeTracker = runCatching { ChangeTracker(dir) }.getOrNull()
+        runCatching { refreshGit() }
+        runCatching { refreshCheckpoints() }
     }
 
     fun closeProject() {

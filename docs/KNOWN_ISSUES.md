@@ -90,3 +90,11 @@ Last updated: 2026-09-06.
   refused on a build with no PRoot loader (§1).
 - The chat's activity timeline keeps every tool row for the session; very long sessions grow the
   message list in memory until the conversation is cleared.
+
+## Fixed after the first APK
+
+- **Crash on every launch after the first one.** `HarnessViewModel.init` restored the last project
+  from the constructor, writing to `MutableStateFlow` properties that were not yet initialised.
+  Fixed by removing the `init` block entirely (start-up is now `vm.start()`, called from the UI),
+  guarding every start-up step, adding `StartupGuard` so an unfinished restore is never retried
+  automatically, and adding `CrashLog` so the app shows its own crash report on the next launch.

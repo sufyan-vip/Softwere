@@ -1,6 +1,7 @@
 package com.sufyan.harness
 
 import android.app.Application
+import java.io.File
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
@@ -10,6 +11,7 @@ import com.sufyan.harness.data.Settings
 import com.sufyan.harness.data.Workspace
 import com.sufyan.harness.runtime.AndroidBuildService
 import com.sufyan.harness.runtime.Connectivity
+import com.sufyan.harness.runtime.CrashLog
 import com.sufyan.harness.runtime.EnvHealth
 import com.sufyan.harness.runtime.GitHubService
 import com.sufyan.harness.runtime.LinuxRuntime
@@ -46,6 +48,8 @@ class HarnessApp : Application() {
         private set
     lateinit var recovery: Recovery
         private set
+    lateinit var crashLog: CrashLog
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -62,6 +66,8 @@ class HarnessApp : Application() {
         runtimeRepair = RuntimeRepair(linux)
         connectivity = Connectivity(this).apply { start() }
         recovery = Recovery(filesDir)
+        // Installed first thing so a failure anywhere after this point is reported on next launch.
+        crashLog = CrashLog(File(filesDir, "crash")).apply { install() }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val runtime = NotificationChannel(

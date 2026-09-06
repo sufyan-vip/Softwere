@@ -1,6 +1,9 @@
 package com.sufyan.harness.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -12,6 +15,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -21,6 +26,7 @@ import androidx.navigation.compose.rememberNavController
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.runtime.RuntimeTask
 import com.sufyan.harness.ui.components.TaskStrip
+import com.sufyan.harness.ui.theme.MonoStyle
 import com.sufyan.harness.ui.chat.ChatScreen
 import com.sufyan.harness.ui.apk.BuildScreen
 import com.sufyan.harness.ui.chat.ModelSelectorScreen
@@ -73,6 +79,11 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
     val nav = rememberNavController()
     val snackbar = remember { SnackbarHostState() }
     val toast by vm.toast.collectAsState()
+    val clipboard = LocalClipboardManager.current
+
+    // Start-up work runs here, not in the view-model constructor: anything that throws while the
+    // view model is being built takes the whole activity down before a screen exists to report it.
+    LaunchedEffect(Unit) { vm.start() }
 
     LaunchedEffect(toast) {
         toast?.let {
@@ -82,6 +93,40 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
     }
 
     val tasks by vm.tasks.tasks.collectAsState()
+
+    // §56 — the previous run died from an uncaught exception: show it instead of losing it.
+    val crash by vm.lastCrash.collectAsState()
+    crash?.let { report ->
+        AlertDialog(
+            onDismissRequest = { vm.dismissCrashReport() },
+            icon = { Icon(Icons.Default.BugReport, contentDescription = null) },
+            title = { Text("Sufyan Harness closed unexpectedly last time") },
+            text = {
+                Column(
+                    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Text(
+                        "This is the error that ended the previous session. Your projects and files " +
+                            "were not touched by it.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(report.message, style = MonoStyle, color = MaterialTheme.colorScheme.error)
+                    Text(
+                        report.stackTrace.lineSequence().take(12).joinToString("\n"),
+                        style = MonoStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { vm.dismissCrashReport() }) { Text("Dismiss") } },
+            dismissButton = {
+                TextButton(onClick = { clipboard.setText(AnnotatedString(report.render())) }) { Text("Copy log") }
+            },
+        )
+    }
 
     // §56 — if the process was killed mid-operation, say so once, with what to do next.
     val interrupted by vm.interrupted.collectAsState()
