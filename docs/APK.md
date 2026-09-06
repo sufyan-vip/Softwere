@@ -9,7 +9,7 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 | | |
 | --- | --- |
-| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34007811588> |
+| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34017467247> |
 | Commit | `HEAD` on `arena/01a07329-softwere` — crash fix, cloud build, cloud shell, agent step budget |
 | Release APK | `app-release.apk` — 12 MB (artifact `sufyan-harness-release-apk`, 11,987,234 bytes zipped) |
 | Debug APK | `app-debug.apk` — 18 MB (artifact `sufyan-harness-debug-apk`, 18,382,876 bytes zipped) |
@@ -27,8 +27,8 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 A direct, login-free link for the same artifacts (the repository is public):
 
-- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34007811588/sufyan-harness-release-apk.zip>
-- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34007811588/sufyan-harness-debug-apk.zip>
+- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34017467247/sufyan-harness-release-apk.zip>
+- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34017467247/sufyan-harness-debug-apk.zip>
 
 ## What changed since the first APK
 
@@ -87,6 +87,13 @@ real rather than theoretical:
 
 Nothing here is unlimited — free tiers are per-minute and per-day capped. Truly unlimited means a
 model running on your own hardware.
+
+## When a cloud build fails
+
+The app does what a developer would do: it downloads the run's log bundle, strips the timestamps and
+stack frames, and shows the compiler's own lines (`e: ...`, `FAILURE:`, `Execution failed for task`).
+Under them is **Ask the AI to fix it**, which opens the chat with those exact lines as the task, so
+the agent reads the real error instead of guessing at it. Nothing is summarised by the app.
 
 ## Install on a phone
 

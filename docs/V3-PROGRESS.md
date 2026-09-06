@@ -349,3 +349,15 @@ real output and exit code in a cloud panel in the Terminal (cloud icon in the to
 
 Tests: `CloudBuildTest` grew to 18, `AgentLoopTest` to 10. Total **145 tests**, green in CI run
 34005358118.
+
+## Follow-up — reading a failed cloud build
+
+A failed build is only useful with the reason attached. `GitHubService.runLogs()` downloads the run's
+log bundle, `CloudBuild.readLogBundle()` reads its text entries with a 6 MB cap, and
+`CloudBuild.buildErrors()` keeps only the lines that explain the failure (compiler `e:` lines,
+`FAILURE:`, `Caused by:`, `Execution failed for task`, test failures) while dropping timestamps,
+warnings and stack frames. The build screen shows them and offers **Ask the AI to fix it**, which
+starts a normal agent turn with those exact lines — the loop this repo's own CI has been proving all
+along, now inside the app.
+
+Tests: `CloudBuildTest` 23. Total **150 tests**, green in CI run 34017467247.
