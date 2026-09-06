@@ -57,7 +57,7 @@ if the code behind it really runs (RULE 3, no fake success).
 | 13 | Background runtime | DONE — `TaskRegistry` + foreground `RuntimeService`, task strip in the app chrome, completion notifications |
 | 14 | Security + performance | DONE — `docs/SECURITY_AUDIT.md`, offline mode (§55) via `Connectivity`, crash recovery (§56) via `Recovery`, `run_command` master switch, cleartext restricted to localhost, bounded logs/scrollback |
 | 15 | Full QA | DONE — 111 unit tests across 15 classes, all executed locally and green (see `docs/IMPLEMENTATION_STATUS.md` for the rig) |
-| 16 | Final APK | PENDING — built by GitHub Actions (`assembleRelease`, falling back to `assembleDebug`); no local Android SDK exists in this environment |
+| 16 | Final APK | DONE — CI run [34002043430](https://github.com/sufyan-vip/Softwere/actions/runs/34002043430) built and verified `app-release.apk` (12 MB) and `app-debug.apk` (18 MB) from commit `36d75d0`. See [APK.md](APK.md) |
 
 ## PHASE 1 — what this change set does
 
@@ -241,3 +241,32 @@ Summarised here; each item names the file that implements it.
 
 Two real bugs were found by writing them: `DiffEngine` never set its `binary` flag, and the Android
 template wrote two files it did not declare. Both are fixed.
+
+## PHASE 16 — the APK
+
+Build: GitHub Actions run **34002043430**, commit `36d75d0`, ubuntu-24.04, Temurin JDK 17,
+Gradle 8.7, AGP 8.5.2, Kotlin 1.9.24, Android SDK build-tools 35.0.0.
+
+Every step is green: `lintDebug` → `testDebugUnitTest` → `assembleDebug` → `assembleRelease` →
+APK verification → artifact upload.
+
+```
+--- Generated APKs ---
+app/build/outputs/apk/debug/app-debug.apk
+-rw-r--r-- 1 runner runner 18M app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/release/app-release.apk
+-rw-r--r-- 1 runner runner 12M app/build/outputs/apk/release/app-release.apk
+PASS: app/build/outputs/apk/debug/app-debug.apk is a valid Android package
+PASS: app/build/outputs/apk/release/app-release.apk is a valid Android package
+BUILD SUCCESSFUL in 1m 36s
+```
+
+Three real compile errors had to be fixed to get here, and they are worth recording because two of
+them could not be seen from the sandbox (there is no Android SDK in it):
+
+1. `ui/build/BuildScreen.kt` was **invisible to the build**. The Gradle `.gitignore` line `build/`
+   matches *any* directory called `build`, including a Kotlin source package — so the file was never
+   committed. The screen now lives in `ui/apk/` (package `com.sufyan.harness.ui.apk`).
+2. `ui/components/AgentUi.kt` used `11.sp` without `import androidx.compose.ui.unit.sp`.
+3. `ui/settings/StorageScreen.kt` read `StorageSnapshot?` as if it were non-null; it now falls back
+   to a zeroed snapshot until the first real measurement lands.
