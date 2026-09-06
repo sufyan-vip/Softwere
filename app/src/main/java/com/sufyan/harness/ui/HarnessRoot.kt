@@ -275,6 +275,7 @@ fun HarnessRoot(vm: HarnessViewModel, onThemeChanged: (ThemeMode) -> Unit) {
                         onBack = { nav.popBackStack() },
                         onOpenGithub = { nav.navigate(Routes.GITHUB) },
                         onOpenRuntime = { nav.navigate(Routes.TOOLCHAINS) },
+                        onOpenChat = { nav.navigate(Routes.CHAT) },
                     )
                 }
                 composable(Routes.REVIEW) {

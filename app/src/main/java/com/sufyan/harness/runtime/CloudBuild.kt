@@ -205,6 +205,61 @@ object CloudBuild {
     fun extractApk(zip: File, destDir: File, maxBytes: Long = 300L * 1024 * 1024): Result<File> =
         extractFirst(zip, destDir, ".apk", maxBytes)
 
+    /**
+     * Reads every text entry of a run's log bundle into one string, newest content last.
+     * Capped, because a Gradle log can be tens of megabytes and this runs on a phone.
+     */
+    fun readLogBundle(zip: File, maxBytes: Long = 6L * 1024 * 1024): Result<String> = runCatching {
+        val out = StringBuilder()
+        var total = 0L
+        ZipInputStream(zip.inputStream().buffered()).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                if (entry.isDirectory || !entry.name.endsWith(".txt", true)) {
+                    zis.closeEntry(); continue
+                }
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = zis.read(buffer)
+                    if (read <= 0) break
+                    total += read
+                    if (total > maxBytes) break
+                    out.append(String(buffer, 0, read))
+                }
+                zis.closeEntry()
+                if (total > maxBytes) break
+            }
+        }
+        if (out.isEmpty()) throw java.io.IOException("The log bundle contained no readable text.")
+        out.toString()
+    }
+
+    private val TIMESTAMP = Regex("""^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?""")
+
+    /**
+     * Picks the lines that actually explain a failed build.
+     *
+     * A CI log is mostly noise; what matters is the compiler's own `e:` lines, Gradle's `FAILURE`
+     * block, test failures and `Caused by`. Timestamps are stripped so the result reads like the
+     * compiler output it is, and the list is capped so it can be shown on a phone and handed to the
+     * model without eating the whole context.
+     */
+    fun buildErrors(log: String, limit: Int = 40): List<String> {
+        val interesting = Regex(
+            """(^|\s)(e:|error:|ERROR:|FAILURE:|FAILED|Caused by:|Execution failed for task|Unresolved reference|Compilation error|\* What went wrong)""",
+        )
+        val noise = Regex("""^\s*at [\w.]+""")
+        val seen = LinkedHashSet<String>()
+        for (raw in log.lineSequence()) {
+            val line = raw.replace(TIMESTAMP, "").trimEnd()
+            if (line.isBlank() || noise.containsMatchIn(line)) continue
+            if (!interesting.containsMatchIn(line)) continue
+            seen += line.trim().take(400)
+            if (seen.size >= limit) break
+        }
+        return seen.toList()
+    }
+
     /** Same, for the command log the cloud terminal brings back. */
     fun extractLog(zip: File, destDir: File): Result<File> =
         extractFirst(zip, destDir, ".txt", 8L * 1024 * 1024)
@@ -277,4 +332,8 @@ data class CloudBuildState(
     val runUrl: String? = null,
     val error: String? = null,
     val lastResult: String? = null,
+    /** The real compiler/Gradle lines from a failed run — empty until they have been fetched. */
+    val errorLines: List<String> = emptyList(),
+    val fetchingLogs: Boolean = false,
+    val runId: Long? = null,
 )

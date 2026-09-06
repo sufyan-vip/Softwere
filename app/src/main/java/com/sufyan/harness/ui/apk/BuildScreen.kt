@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
@@ -79,6 +80,7 @@ fun BuildScreen(
     onBack: () -> Unit,
     onOpenGithub: () -> Unit = {},
     onOpenRuntime: () -> Unit = {},
+    onOpenChat: () -> Unit = {},
 ) {
     val state by vm.buildState.collectAsState()
     val cloud by vm.cloudBuildState.collectAsState()
@@ -174,6 +176,11 @@ fun BuildScreen(
                     onStop = { vm.stopFollowingCloudBuild() },
                     onOpenRun = { url -> uriHandler.openUri(url) },
                     onOpenGithub = onOpenGithub,
+                    onReadLog = { vm.fetchCloudBuildErrors() },
+                    onAskAgent = {
+                        vm.askAgentToFixCloudBuild()
+                        onOpenChat()
+                    },
                 )
             }
 
@@ -432,6 +439,8 @@ private fun CloudBuildCard(
     onStop: () -> Unit,
     onOpenRun: (String) -> Unit,
     onOpenGithub: () -> Unit,
+    onReadLog: () -> Unit,
+    onAskAgent: () -> Unit,
 ) {
     HarnessCard {
         Column(Modifier.padding(Spacing.lg), verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
@@ -482,6 +491,30 @@ private fun CloudBuildCard(
             cloud.error?.let { error ->
                 Text("Cloud build stopped", style = MaterialTheme.typography.labelLarge, color = HarnessColors.Danger)
                 Text(error, style = MaterialTheme.typography.bodySmall)
+
+                // §38 — a failure is only useful with the reason attached, so the real compiler
+                // lines from the run are fetched and can be handed straight to the agent.
+                if (cloud.errorLines.isNotEmpty()) {
+                    Spacer(Modifier.height(Spacing.xs))
+                    Text("From the run log", style = MaterialTheme.typography.labelMedium)
+                    CodeBlock(cloud.errorLines.joinToString("\n"))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                        PrimaryButton(
+                            text = "Ask the AI to fix it",
+                            onClick = onAskAgent,
+                            modifier = Modifier.weight(1f),
+                            icon = Icons.Default.AutoFixHigh,
+                        )
+                    }
+                } else if (cloud.fetchingLogs) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(Spacing.sm))
+                        Text("Reading the run log\u2026", style = MaterialTheme.typography.bodySmall)
+                    }
+                } else if (cloud.runId != null) {
+                    SecondaryButton(text = "Read the error log", onClick = onReadLog)
+                }
             }
             cloud.lastResult?.let { result ->
                 Text(result, style = MaterialTheme.typography.bodySmall, color = HarnessColors.Ok)

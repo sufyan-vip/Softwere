@@ -1771,6 +1771,7 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                             ?: steps.lastOrNull { it.conclusion != null }?.name
                         _cloudBuild.value = _cloudBuild.value.copy(
                             runUrl = current.htmlUrl,
+                            runId = current.id,
                             steps = steps,
                             phase = when (progress) {
                                 CloudBuild.Progress.Queued -> "Queued on GitHub..."
@@ -1780,7 +1781,11 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                             },
                         )
                     },
-                ).getOrElse { return@launch cloudFail(it.message ?: "The cloud build did not finish.") }
+                ).getOrElse {
+                    cloudFail(it.message ?: "The cloud build did not finish.")
+                    fetchCloudBuildErrors(full)
+                    return@launch
+                }
 
                 cloudPhase("Downloading the APK...")
                 val artifacts = github.runArtifacts(full, run.id).getOrElse {
@@ -1944,6 +1949,62 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    /**
+     * §38 — after a failed run, read the real log instead of guessing.
+     *
+     * This is the difference between "the build failed" and a fix: the compiler's own lines are
+     * pulled out of GitHub's log bundle and shown, and [askAgentToFixCloudBuild] can hand exactly
+     * those lines to the model.
+     */
+    fun fetchCloudBuildErrors(fullName: String? = null) {
+        val p = _active.value ?: return
+        val full = fullName ?: p.repoFullName ?: return
+        val runId = _cloudBuild.value.runId ?: return
+        if (_cloudBuild.value.fetchingLogs) return
+        _cloudBuild.value = _cloudBuild.value.copy(fetchingLogs = true)
+        viewModelScope.launch {
+            try {
+                val zip = File(application.cacheDir, "cloud-logs-$runId.zip")
+                github.runLogs(full, runId, zip).getOrElse {
+                    _cloudBuild.value = _cloudBuild.value.copy(
+                        fetchingLogs = false,
+                        lastResult = "Could not download the run log: ${it.message}. Open the run on GitHub to read it.",
+                    )
+                    return@launch
+                }
+                val text = withContext(Dispatchers.IO) { CloudBuild.readLogBundle(zip) }.getOrElse {
+                    _cloudBuild.value = _cloudBuild.value.copy(fetchingLogs = false)
+                    return@launch
+                }
+                zip.delete()
+                val lines = withContext(Dispatchers.Default) { CloudBuild.buildErrors(text) }
+                _cloudBuild.value = _cloudBuild.value.copy(
+                    fetchingLogs = false,
+                    errorLines = lines,
+                    lastResult = if (lines.isEmpty()) {
+                        "The log downloaded but contained no recognisable error lines. Open the run on GitHub."
+                    } else {
+                        _cloudBuild.value.lastResult
+                    },
+                )
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                _cloudBuild.value = _cloudBuild.value.copy(fetchingLogs = false)
+            }
+        }
+    }
+
+    /** Sends the real failure to the agent as a normal turn, so the fix is visible and reviewable. */
+    fun askAgentToFixCloudBuild() {
+        val lines = _cloudBuild.value.errorLines
+        if (lines.isEmpty()) return
+        send(
+            "The cloud build failed on GitHub Actions. These are the real error lines from the run log:\n\n" +
+                lines.joinToString("\n") { "    $it" } +
+                "\n\nFind the cause in this project and fix it. Do not guess: read the files the errors point at first.",
+        )
     }
 
     fun stopFollowingCloudCommand() {

@@ -2,6 +2,7 @@ package com.sufyan.harness
 
 import com.sufyan.harness.runtime.CloudBuild
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -188,5 +189,60 @@ class CloudBuildTest {
     fun `an artifact without a log is refused`() {
         val zip = zipWith("something.bin" to ByteArray(3))
         assertTrue(CloudBuild.extractLog(zip, File(temp.root, "log2")).isFailure)
+    }
+
+    // ---- reading why a build failed (the part that makes a fix possible) ----
+
+    private val gradleLog = """
+        2026-09-06T01:57:26.6244303Z w: file:///x/Editor.kt:88:44 'NoteAdd' is deprecated
+        2026-09-06T01:57:26.6250335Z > Task :app:compileDebugKotlin
+        2026-09-06T01:57:26.6257751Z e: file:///x/HarnessViewModel.kt:1620:31 Unresolved reference: cloudPrepare
+        2026-09-06T01:57:26.6265312Z e: file:///x/CloudBuild.kt:12:9 Expecting a top level declaration
+        2026-09-06T01:58:50.1369912Z FAILURE: Build failed with an exception.
+        2026-09-06T01:58:50.1372007Z 	at org.gradle.api.internal.tasks.Something.run(Something.java:130)
+        2026-09-06T01:58:50.1437589Z Caused by: org.gradle.api.internal.CompilationFailedException
+        2026-09-06T01:58:50.1296632Z * What went wrong:
+        2026-09-06T01:58:50.1298415Z Execution failed for task ':app:compileDebugKotlin'.
+    """.trimIndent()
+
+    @Test
+    fun `the real compiler errors are pulled out of a noisy log`() {
+        val errors = CloudBuild.buildErrors(gradleLog)
+        assertTrue(errors.any { it.contains("Unresolved reference: cloudPrepare") })
+        assertTrue(errors.any { it.contains("Expecting a top level declaration") })
+        assertTrue(errors.any { it.startsWith("FAILURE:") })
+        assertTrue(errors.any { it.contains("Execution failed for task") })
+    }
+
+    @Test
+    fun `warnings, timestamps and stack frames are left out`() {
+        val errors = CloudBuild.buildErrors(gradleLog)
+        assertFalse("a deprecation warning is not a build error", errors.any { it.contains("is deprecated") })
+        assertFalse("stack frames are noise", errors.any { it.trimStart().startsWith("at org.gradle") })
+        assertFalse("timestamps must be stripped", errors.any { it.startsWith("2026-") })
+    }
+
+    @Test
+    fun `the error list is capped so a phone and a model can both take it`() {
+        val huge = (1..500).joinToString("\n") { "e: file:///x/F$it.kt:1:1 Unresolved reference: x$it" }
+        assertEquals(40, CloudBuild.buildErrors(huge).size)
+        assertEquals(5, CloudBuild.buildErrors(huge, limit = 5).size)
+    }
+
+    @Test
+    fun `a clean log yields no errors at all`() {
+        assertTrue(CloudBuild.buildErrors("> Task :app:assembleDebug\nBUILD SUCCESSFUL in 3m").isEmpty())
+    }
+
+    @Test
+    fun `the log bundle is read out of the zip GitHub returns`() {
+        val zip = zipWith(
+            "0_build.txt" to "e: file:///x/A.kt:1:1 Unresolved reference: foo\n".toByteArray(),
+            "1_test.txt" to "FAILURE: Build failed with an exception.\n".toByteArray(),
+        )
+        val text = CloudBuild.readLogBundle(zip).getOrThrow()
+        val errors = CloudBuild.buildErrors(text)
+        assertTrue(errors.any { it.contains("Unresolved reference: foo") })
+        assertTrue(errors.any { it.startsWith("FAILURE:") })
     }
 }

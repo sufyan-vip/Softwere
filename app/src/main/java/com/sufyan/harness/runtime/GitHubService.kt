@@ -466,4 +466,27 @@ class GitHubService(private val secure: SecureStore) {
                 dest.length()
             }
         }
+
+    /**
+     * Downloads the whole log bundle of a run (§38 — reading the real failure instead of guessing).
+     * GitHub answers with a redirect to a signed zip; OkHttp follows it with the auth header intact.
+     */
+    suspend fun runLogs(fullName: String, runId: Long, dest: File): Result<File> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url("$API/repos/$fullName/actions/runs/$runId/logs")
+                    .authed()
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw errorFor(response, response.body?.string().orEmpty())
+                    val body = response.body ?: throw IOException("GitHub returned an empty response.")
+                    dest.parentFile?.mkdirs()
+                    dest.outputStream().use { out -> body.byteStream().copyTo(out) }
+                }
+                if (dest.length() == 0L) throw IOException("The log download was empty.")
+                dest
+            }
+        }
 }
