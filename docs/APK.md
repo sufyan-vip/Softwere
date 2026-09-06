@@ -9,10 +9,10 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 | | |
 | --- | --- |
-| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34002043430> |
-| Commit | `36d75d0` on `arena/01a07329-softwere` |
-| Release APK | `app-release.apk` — 12 MB (artifact `sufyan-harness-release-apk`, 11,944,308 bytes zipped) |
-| Debug APK | `app-debug.apk` — 18 MB (artifact `sufyan-harness-debug-apk`, 18,315,265 bytes zipped) |
+| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34002739891> |
+| Commit | `d822578` on `arena/01a07329-softwere` — includes the second-launch crash fix |
+| Release APK | `app-release.apk` — 12 MB (artifact `sufyan-harness-release-apk`, 11,951,540 bytes zipped) |
+| Debug APK | `app-debug.apk` — 18 MB (artifact `sufyan-harness-debug-apk`, 18,323,478 bytes zipped) |
 | Verification | `PASS: ... is a valid Android package` for both files |
 | Application id | `com.sufyan.harness` (debug variant: `com.sufyan.harness.debug`) |
 | Version | 1.0.0 (versionCode 1) |
@@ -27,8 +27,15 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 A direct, login-free link for the same artifacts (the repository is public):
 
-- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34002043430/sufyan-harness-release-apk.zip>
-- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34002043430/sufyan-harness-debug-apk.zip>
+- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34002739891/sufyan-harness-release-apk.zip>
+- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34002739891/sufyan-harness-debug-apk.zip>
+
+## What changed since the first APK
+
+The first build crashed on every launch after the first one (`Cannot create an instance of class
+HarnessViewModel`). That is fixed in this build — see the *Post-release fix* section of
+[V3-PROGRESS.md](V3-PROGRESS.md). If you already installed the earlier APK, install this one over
+it; no need to clear data, and the app will now also show you the log of any crash it hits.
 
 ## Install on a phone
 
