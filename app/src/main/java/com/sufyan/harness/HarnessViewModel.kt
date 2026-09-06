@@ -10,6 +10,7 @@ import com.sufyan.harness.data.*
 import com.sufyan.harness.runtime.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -1557,6 +1558,225 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- §34-§39: cloud build (GitHub Actions) ------------------------------
+
+    private val _cloudBuild = MutableStateFlow(CloudBuildState())
+    val cloudBuildState = _cloudBuild.asStateFlow()
+    private var cloudJob: Job? = null
+
+    /** True when this project can be built in the cloud right now — each part is checked, not assumed. */
+    fun cloudBuildBlockers(): List<String> {
+        val p = _active.value
+        return buildList {
+            if (p == null) add("No project is open.")
+            if (!github.hasToken()) add("GitHub is not connected. Connect a token with the `repo` and `workflow` scopes.")
+            if (p != null && p.repoFullName == null) add("This project is not linked to a GitHub repository.")
+            if (!isOnline()) add("This device is offline.")
+        }
+    }
+
+    /**
+     * Builds the APK on GitHub's machines and brings it back to the phone.
+     *
+     * The phone cannot do this itself: Android ships no JDK, and Google publishes `aapt2` and
+     * build-tools only for x86_64 desktops. Rather than fake a local build, this pushes the project,
+     * dispatches the workflow, follows the real run step by step, downloads the artifact, verifies
+     * it is a genuine package and only then offers to install it.
+     */
+    fun startCloudBuild(variant: String) {
+        val p = _active.value ?: return notify("Open a project first.")
+        val blockers = cloudBuildBlockers()
+        if (blockers.isNotEmpty()) {
+            _cloudBuild.value = CloudBuildState(error = blockers.joinToString(" "))
+            return
+        }
+        if (_cloudBuild.value.running) return
+        val full = p.repoFullName!!
+        val branch = p.repoBranch ?: "main"
+        val wanted = CloudBuild.normalise(variant)
+
+        _cloudBuild.value = CloudBuildState(running = true, phase = "Preparing...")
+        tasks.start(TASK_CLOUD, "Cloud build: ${p.name}", RuntimeTask.Kind.Build)
+
+        cloudJob = viewModelScope.launch {
+            try {
+                // 1 — the repository has to contain the project *and* a workflow that can build it.
+                cloudPhase("Checking the workflow on GitHub...")
+                val hasWorkflow = github.fetchFile(full, CloudBuild.WORKFLOW_PATH, branch).isSuccess
+
+                cloudPhase("Collecting local changes...")
+                val dir = workspace.projectDir(p)
+                val local = withContext(Dispatchers.IO) { ProjectSync.collect(dir) }
+                val remoteSha = github.headSha(full, branch).getOrNull()
+                val remote = github.listTree(full, branch).getOrElse { emptyList() }
+                val status = withContext(Dispatchers.IO) { ProjectSync.status(local, remote, remoteSha, p.lastSyncSha) }
+                val payload = withContext(Dispatchers.IO) { ProjectSync.payload(local, status) }.toMutableMap()
+                if (!hasWorkflow) {
+                    payload[CloudBuild.WORKFLOW_PATH] = CloudBuild.workflowYaml().toByteArray()
+                }
+
+                if (payload.isNotEmpty() || status.deleted.isNotEmpty()) {
+                    cloudPhase("Pushing ${payload.size} file(s) to $full...")
+                    val push = github.pushFiles(
+                        fullName = full,
+                        branch = branch,
+                        message = if (hasWorkflow) "Sufyan Harness: sync before cloud build" else "Sufyan Harness: add cloud build workflow",
+                        files = payload,
+                        deletions = status.deleted,
+                        expectedSha = p.lastSyncSha ?: remoteSha,
+                        onProgress = { line -> cloudPhase(line) },
+                    ).getOrElse { return@launch cloudFail(it.message ?: "The push to GitHub failed.") }
+
+                    when (push) {
+                        is PushOutcome.Rejected -> return@launch cloudFail(
+                            push.reason + " Resolve it on the GitHub screen, then start the cloud build again.",
+                        )
+                        is PushOutcome.Success -> {
+                            p.lastSyncSha = push.commitSha
+                            workspace.update(p)
+                            _active.value = p.copy()
+                            refreshSync()
+                        }
+                    }
+                } else {
+                    cloudPhase("GitHub is already up to date with this project.")
+                }
+
+                // 2 — start the run.
+                val dispatchedAt = System.currentTimeMillis()
+                cloudPhase("Starting the $wanted build on GitHub...")
+                github.dispatchWorkflow(
+                    full, CloudBuild.WORKFLOW_FILE, branch, mapOf("variant" to wanted),
+                ).getOrElse {
+                    return@launch cloudFail(
+                        (it.message ?: "GitHub refused to start the workflow.") +
+                            " A cloud build needs a token with the `workflow` scope, and the workflow file must exist on \"$branch\".",
+                    )
+                }
+
+                // 3 — find the run we just started (never adopt someone else's).
+                cloudPhase("Waiting for GitHub to queue the run...")
+                var run: CloudRun? = null
+                val findDeadline = System.currentTimeMillis() + 90_000
+                while (run == null && System.currentTimeMillis() < findDeadline) {
+                    delay(CloudBuild.POLL_MS)
+                    run = github.latestWorkflowRun(full, CloudBuild.WORKFLOW_FILE, branch, dispatchedAt).getOrNull()
+                }
+                if (run == null) {
+                    return@launch cloudFail(
+                        "GitHub accepted the request but no run appeared within 90 seconds. Check the Actions tab of $full.",
+                    )
+                }
+                _cloudBuild.value = _cloudBuild.value.copy(runUrl = run.htmlUrl)
+
+                // 4 — follow it step by step.
+                val deadline = System.currentTimeMillis() + CloudBuild.TIMEOUT_MS
+                var progress: CloudBuild.Progress = CloudBuild.Progress.Queued
+                while (System.currentTimeMillis() < deadline) {
+                    val current = github.workflowRun(full, run.id).getOrNull()
+                    if (current != null) {
+                        progress = CloudBuild.progressOf(current.status, current.conclusion)
+                        val steps = github.workflowRunSteps(full, run.id).getOrDefault(emptyList())
+                        val active = steps.lastOrNull { it.status == "in_progress" }?.name
+                            ?: steps.lastOrNull { it.conclusion != null }?.name
+                        _cloudBuild.value = _cloudBuild.value.copy(
+                            steps = steps,
+                            phase = when (progress) {
+                                CloudBuild.Progress.Queued -> "Queued on GitHub..."
+                                CloudBuild.Progress.Running -> active?.let { "Running: $it" } ?: "Building..."
+                                CloudBuild.Progress.Succeeded -> "Build finished — fetching the APK..."
+                                is CloudBuild.Progress.Ended -> "Run ended"
+                            },
+                        )
+                        if (current.status == "completed") break
+                    }
+                    delay(CloudBuild.POLL_MS)
+                }
+
+                when (val result = progress) {
+                    is CloudBuild.Progress.Ended -> return@launch cloudFail(result.explanation)
+                    CloudBuild.Progress.Succeeded -> Unit
+                    else -> return@launch cloudFail(
+                        "The run was still going after ${CloudBuild.TIMEOUT_MS / 60_000} minutes, so the app stopped waiting. It is still running on GitHub.",
+                    )
+                }
+
+                // 5 — download, verify, offer to install. Nothing is claimed before this succeeds.
+                cloudPhase("Downloading the APK...")
+                val artifacts = github.runArtifacts(full, run.id).getOrElse {
+                    return@launch cloudFail(it.message ?: "Could not list the run's artifacts.")
+                }
+                val name = CloudBuild.pickArtifact(artifacts.map { it.name }, wanted)
+                    ?: return@launch cloudFail(
+                        "The run succeeded but uploaded no APK artifact. Check that the workflow's upload step ran.",
+                    )
+                val artifact = artifacts.first { it.name == name }
+                val zip = File(application.cacheDir, "cloud-$name-${run.id}.zip")
+                github.downloadArtifact(full, artifact.id, zip).getOrElse {
+                    return@launch cloudFail(it.message ?: "Downloading the artifact failed.")
+                }
+
+                cloudPhase("Verifying the package...")
+                val apkDir = File(exportsDir(), "apk").apply { mkdirs() }
+                val apk = withContext(Dispatchers.IO) { CloudBuild.extractApk(zip, apkDir) }.getOrElse {
+                    return@launch cloudFail(it.message ?: "The artifact did not contain an APK.")
+                }
+                zip.delete()
+                val report = withContext(Dispatchers.IO) { ApkVerifier.verify(apk) }
+                if (!report.valid) {
+                    return@launch cloudFail("The downloaded file is not a valid APK: ${report.problem ?: "unknown reason"}.")
+                }
+
+                val built = BuildArtifact(apk, wanted, report, System.currentTimeMillis())
+                _buildState.value = _buildState.value.copy(
+                    artifacts = listOf(built) + _buildState.value.artifacts.filterNot { it.file == apk },
+                )
+                _cloudBuild.value = _cloudBuild.value.copy(
+                    running = false,
+                    phase = "Done",
+                    error = null,
+                    lastResult = "${apk.name} built on GitHub and verified — ${report.sizeBytes / 1024 / 1024} MB. Tap Install below.",
+                )
+                notify("Cloud build finished: ${apk.name}")
+                if (settings.notifyOnTaskComplete) {
+                    RuntimeService.notifyCompleted(application, "APK ready", "${apk.name} downloaded from GitHub Actions")
+                }
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                cloudFail(t.message ?: "The cloud build failed.")
+            } finally {
+                tasks.finish(TASK_CLOUD)
+                if (_cloudBuild.value.running) {
+                    _cloudBuild.value = _cloudBuild.value.copy(running = false)
+                }
+            }
+        }
+    }
+
+    /** Stops following the run. Honest wording: GitHub keeps building; only the app stops watching. */
+    fun stopFollowingCloudBuild() {
+        cloudJob?.cancel()
+        cloudJob = null
+        tasks.finish(TASK_CLOUD)
+        _cloudBuild.value = _cloudBuild.value.copy(
+            running = false,
+            phase = "Stopped watching",
+            lastResult = "The app stopped following the run. GitHub is still building it — open the run to check.",
+        )
+    }
+
+    fun clearCloudBuildError() {
+        _cloudBuild.value = _cloudBuild.value.copy(error = null)
+    }
+
+    private fun cloudPhase(text: String) {
+        _cloudBuild.value = _cloudBuild.value.copy(phase = text, error = null)
+    }
+
+    private fun cloudFail(reason: String) {
+        _cloudBuild.value = _cloudBuild.value.copy(running = false, error = reason)
+    }
+
     /** §37 — hands the verified APK to the system installer. */
     fun installArtifact(artifact: BuildArtifact): Intent? =
         builder.installIntent(artifact).fold(
@@ -1658,5 +1878,6 @@ class HarnessViewModel(app: Application) : AndroidViewModel(app) {
         const val TASK_BUILD = "build"
         const val TASK_SHELL = "shell"
         const val TASK_SYNC = "sync"
+        const val TASK_CLOUD = "cloud-build"
     }
 }

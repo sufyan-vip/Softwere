@@ -362,4 +362,108 @@ class GitHubService(private val secure: SecureStore) {
         }
         PushOutcome.Success(commitSha, files.size)
     }
+
+    // ---- Actions: cloud build (§34-§39) ------------------------------------
+
+    /**
+     * Starts the workflow at [workflowFile] on [branch]. Requires the token to have the `workflow`
+     * scope; GitHub answers 403 or 404 otherwise, which [errorFor] turns into an actionable message.
+     */
+    suspend fun dispatchWorkflow(
+        fullName: String,
+        workflowFile: String,
+        branch: String,
+        inputs: Map<String, String> = emptyMap(),
+    ): Result<Unit> = runCatching {
+        request(
+            "POST", "/repos/$fullName/actions/workflows/$workflowFile/dispatches",
+            buildJsonObject {
+                put("ref", branch)
+                if (inputs.isNotEmpty()) {
+                    put("inputs", buildJsonObject { inputs.forEach { (k, v) -> put(k, v) } })
+                }
+            },
+        )
+        Unit
+    }
+
+    private fun JsonObject.toRun(): CloudRun = CloudRun(
+        id = this["id"]!!.jsonPrimitive.long,
+        status = this["status"]?.jsonPrimitive?.contentOrNull,
+        conclusion = this["conclusion"]?.jsonPrimitive?.contentOrNull,
+        htmlUrl = this["html_url"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        createdAtMs = this["created_at"]?.jsonPrimitive?.contentOrNull
+            ?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrDefault(0L) } ?: 0L,
+    )
+
+    /**
+     * The newest run of [workflowFile] on [branch]. [notBefore] guards against picking up an older
+     * run that happens to still be listed — the app must never report someone else's build as
+     * the one it just started (RULE 3).
+     */
+    suspend fun latestWorkflowRun(
+        fullName: String,
+        workflowFile: String,
+        branch: String,
+        notBefore: Long = 0L,
+    ): Result<CloudRun?> = runCatching {
+        val runs = request(
+            "GET",
+            "/repos/$fullName/actions/workflows/$workflowFile/runs?branch=$branch&per_page=10",
+        ).jsonObject["workflow_runs"]?.jsonArray.orEmpty()
+        runs.map { it.jsonObject.toRun() }
+            .filter { it.createdAtMs == 0L || it.createdAtMs >= notBefore - 60_000L }
+            .maxByOrNull { it.id }
+    }
+
+    suspend fun workflowRun(fullName: String, runId: Long): Result<CloudRun> = runCatching {
+        request("GET", "/repos/$fullName/actions/runs/$runId").jsonObject.toRun()
+    }
+
+    /** Steps of the run's first job — this is what makes progress real instead of a spinner. */
+    suspend fun workflowRunSteps(fullName: String, runId: Long): Result<List<CloudStep>> = runCatching {
+        val jobs = request("GET", "/repos/$fullName/actions/runs/$runId/jobs").jsonObject["jobs"]?.jsonArray.orEmpty()
+        val first = jobs.firstOrNull()?.jsonObject ?: return@runCatching emptyList()
+        first["steps"]?.jsonArray.orEmpty().map { element ->
+            val step = element.jsonObject
+            CloudStep(
+                name = step["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                status = step["status"]?.jsonPrimitive?.contentOrNull,
+                conclusion = step["conclusion"]?.jsonPrimitive?.contentOrNull,
+            )
+        }
+    }
+
+    suspend fun runArtifacts(fullName: String, runId: Long): Result<List<CloudArtifact>> = runCatching {
+        request("GET", "/repos/$fullName/actions/runs/$runId/artifacts").jsonObject["artifacts"]?.jsonArray
+            .orEmpty()
+            .map {
+                val a = it.jsonObject
+                CloudArtifact(
+                    id = a["id"]!!.jsonPrimitive.long,
+                    name = a["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    sizeBytes = a["size_in_bytes"]?.jsonPrimitive?.longOrNull ?: 0L,
+                )
+            }
+    }
+
+    /** Downloads an artifact zip. Real bytes on disk: the caller verifies what is inside it. */
+    suspend fun downloadArtifact(fullName: String, artifactId: Long, dest: File): Result<Long> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url("$API/repos/$fullName/actions/artifacts/$artifactId/zip")
+                    .authed()
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw errorFor(response, response.body?.string().orEmpty())
+                    val body = response.body ?: throw IOException("GitHub returned an empty response.")
+                    dest.parentFile?.mkdirs()
+                    dest.outputStream().use { out -> body.byteStream().copyTo(out) }
+                }
+                if (dest.length() == 0L) throw IOException("The downloaded artifact is empty.")
+                dest.length()
+            }
+        }
 }

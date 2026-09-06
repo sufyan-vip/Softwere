@@ -20,6 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.InstallMobile
@@ -42,11 +44,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.runtime.BuildArtifact
 import com.sufyan.harness.runtime.BuildOutcome
 import com.sufyan.harness.runtime.BuildRequirement
+import com.sufyan.harness.runtime.CloudStep
 import com.sufyan.harness.ui.components.AppTopBar
 import com.sufyan.harness.ui.components.CodeBlock
 import com.sufyan.harness.ui.components.ConfirmDialog
@@ -77,8 +81,10 @@ fun BuildScreen(
     onOpenRuntime: () -> Unit = {},
 ) {
     val state by vm.buildState.collectAsState()
+    val cloud by vm.cloudBuildState.collectAsState()
     val project by vm.active.collectAsState()
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     var pendingDelete by remember { mutableStateOf<BuildArtifact?>(null) }
 
     LaunchedEffect(project?.id) { vm.detectBuildEnvironment() }
@@ -156,6 +162,22 @@ fun BuildScreen(
                     }
                 }
             }
+
+            // ---- cloud build (§34-§39) ---------------------------------------
+            item {
+                CloudBuildCard(
+                    cloud = cloud,
+                    blockers = vm.cloudBuildBlockers(),
+                    repo = project?.repoFullName,
+                    branch = project?.repoBranch ?: "main",
+                    onBuild = { variant -> vm.startCloudBuild(variant) },
+                    onStop = { vm.stopFollowingCloudBuild() },
+                    onOpenRun = { url -> uriHandler.openUri(url) },
+                    onOpenGithub = onOpenGithub,
+                )
+            }
+
+            item { SectionHeader("Build on this device") }
 
             // ---- actions -----------------------------------------------------
             item {
@@ -392,5 +414,126 @@ private fun ArtifactCard(
                 }
             }
         }
+    }
+}
+
+/**
+ * The cloud path. It is presented *first* because on a phone it is usually the only one that can
+ * actually produce an APK — and every line here reflects a real check: a token that exists, a repo
+ * that is linked, a run that GitHub really started, and a file that has been verified after download.
+ */
+@Composable
+private fun CloudBuildCard(
+    cloud: com.sufyan.harness.runtime.CloudBuildState,
+    blockers: List<String>,
+    repo: String?,
+    branch: String,
+    onBuild: (String) -> Unit,
+    onStop: () -> Unit,
+    onOpenRun: (String) -> Unit,
+    onOpenGithub: () -> Unit,
+) {
+    HarnessCard {
+        Column(Modifier.padding(Spacing.lg), verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(Spacing.sm))
+                Column(Modifier.weight(1f)) {
+                    Text("Build in the cloud", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        repo?.let { "$it · $branch" } ?: "No repository linked",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (cloud.running) StatusChip("Running", StatusKind.Info)
+            }
+
+            Text(
+                "Android phones ship no JDK, and Google builds aapt2 only for desktop CPUs, so a real " +
+                    "Gradle build cannot run here. This pushes the project to GitHub, builds it on GitHub's " +
+                    "machines, then downloads and verifies the APK so you can install it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (blockers.isNotEmpty()) {
+                blockers.forEach { b ->
+                    Text("• $b", style = MaterialTheme.typography.bodySmall, color = HarnessColors.Warn)
+                }
+                TextButton(onClick = onOpenGithub) { Text("Open GitHub setup") }
+            }
+
+            if (cloud.running) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(Spacing.sm))
+                    Text(cloud.phase, style = MaterialTheme.typography.bodyMedium)
+                }
+                cloud.steps.takeIf { it.isNotEmpty() }?.let { steps ->
+                    Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                        steps.forEach { step -> CloudStepRow(step) }
+                    }
+                }
+            } else if (cloud.phase.isNotEmpty()) {
+                Text(cloud.phase, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            cloud.error?.let { error ->
+                Text("Cloud build stopped", style = MaterialTheme.typography.labelLarge, color = HarnessColors.Danger)
+                Text(error, style = MaterialTheme.typography.bodySmall)
+            }
+            cloud.lastResult?.let { result ->
+                Text(result, style = MaterialTheme.typography.bodySmall, color = HarnessColors.Ok)
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                if (cloud.running) {
+                    SecondaryButton(text = "Stop watching", onClick = onStop, modifier = Modifier.weight(1f))
+                } else {
+                    PrimaryButton(
+                        text = "Cloud debug",
+                        onClick = { onBuild("debug") },
+                        modifier = Modifier.weight(1f),
+                        enabled = blockers.isEmpty(),
+                        icon = Icons.Default.CloudUpload,
+                    )
+                    SecondaryButton(
+                        text = "Cloud release",
+                        onClick = { onBuild("release") },
+                        modifier = Modifier.weight(1f),
+                        enabled = blockers.isEmpty(),
+                    )
+                }
+            }
+            cloud.runUrl?.let { url ->
+                TextButton(onClick = { onOpenRun(url) }) {
+                    Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(Spacing.xs))
+                    Text("Open the run on GitHub")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloudStepRow(step: CloudStep) {
+    val (tint, icon) = when {
+        step.conclusion == "success" -> HarnessColors.Ok to Icons.Default.CheckCircle
+        step.conclusion == "skipped" -> MaterialTheme.colorScheme.onSurfaceVariant to Icons.Default.CheckCircle
+        step.conclusion != null -> HarnessColors.Danger to Icons.Default.ErrorOutline
+        step.status == "in_progress" -> HarnessColors.Info to Icons.Default.Build
+        else -> MaterialTheme.colorScheme.onSurfaceVariant to Icons.Default.Build
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(Spacing.sm))
+        Text(
+            step.name,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (step.status == "in_progress") MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

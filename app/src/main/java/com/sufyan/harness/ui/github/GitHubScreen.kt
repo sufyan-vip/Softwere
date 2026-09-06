@@ -107,7 +107,8 @@ fun GitHubScreen(vm: HarnessViewModel, onBack: () -> Unit) {
                         Column(Modifier.padding(Spacing.lg), verticalArrangement = Arrangement.spacedBy(Spacing.md)) {
                             Text("Connect GitHub", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "Paste a personal access token with the `repo` scope. It is stored encrypted by the " +
+                                "Paste a personal access token with the `repo` scope — add `workflow` too if you want to " +
+                                    "build APKs in the cloud from the Build screen. It is stored encrypted by the " +
                                     "Android Keystore, never written to the terminal, never logged, and never given " +
                                     "to the AI.",
                                 style = MaterialTheme.typography.bodySmall,
