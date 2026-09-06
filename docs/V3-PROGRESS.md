@@ -308,3 +308,23 @@ dies before any UI exists. Permanent, unrecoverable from the user's side.
 
 Tests: `StartupGuardTest` (6) and `CrashLogTest` (8), including the exact device crash text as a
 parser fixture. Total **125 tests**.
+
+## Follow-up — cloud build (§34-§39 completed for real devices)
+
+The Build APK screen honestly reported five missing requirements on a phone (JDK 17, Gradle, Android
+SDK, platform, build-tools), and none of them can be satisfied there: Android has no JVM, this build
+ships no PRoot loader (`libproot.so` is absent, so `LinuxRuntime.install` correctly refuses), and
+Google publishes `aapt2`/`zipalign`/`apksigner` only for x86_64 desktops. Rather than leave the
+screen as a dead end, the build now happens where a toolchain exists.
+
+- `runtime/CloudBuild.kt` — the workflow the app installs into the *user's* repository, artifact
+  selection, run-status interpretation and zip-slip/size-safe APK extraction. Pure and unit tested.
+- `GitHubService` — Actions API: `dispatchWorkflow`, `latestWorkflowRun`, `workflowRun`,
+  `workflowRunSteps`, `runArtifacts`, `downloadArtifact`.
+- `HarnessViewModel.startCloudBuild(variant)` — push → dispatch → follow the real run step by step →
+  download → `ApkVerifier.verify` → the APK joins the artifact list with Install/Share. Every failure
+  path reports WHAT/WHY/HOW; `stopFollowingCloudBuild()` says plainly that GitHub keeps building.
+- Build screen — a *Build in the cloud* card with live step list and a link to the run, above the
+  on-device section.
+
+Tests: `CloudBuildTest` (14). Total **139 tests**, green in CI run 34004002555.
