@@ -22,7 +22,7 @@ import com.sufyan.harness.HarnessViewModel
 import com.sufyan.harness.runtime.RuntimeTask
 import com.sufyan.harness.ui.components.TaskStrip
 import com.sufyan.harness.ui.chat.ChatScreen
-import com.sufyan.harness.ui.build.BuildScreen
+import com.sufyan.harness.ui.apk.BuildScreen
 import com.sufyan.harness.ui.chat.ModelSelectorScreen
 import com.sufyan.harness.ui.editor.EditorScreen
 import com.sufyan.harness.ui.git.GitScreen

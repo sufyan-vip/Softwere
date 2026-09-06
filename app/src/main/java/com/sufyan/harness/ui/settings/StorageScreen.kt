@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.sufyan.harness.HarnessViewModel
+import com.sufyan.harness.StorageSnapshot
 import com.sufyan.harness.runtime.RuntimeState
 import com.sufyan.harness.ui.components.AppTopBar
 import com.sufyan.harness.ui.components.ConfirmDialog
@@ -51,7 +52,9 @@ fun StorageScreen(vm: HarnessViewModel, onBack: () -> Unit) {
     var confirmClearBuild by remember { mutableStateOf(false) }
 
     // Sizes are measured off the main thread and delivered through the ViewModel (§52).
-    val snapshot by vm.storage.collectAsState()
+    // The snapshot is null until the first measurement finishes; zeros are honest until then.
+    val measured by vm.storage.collectAsState()
+    val snapshot = measured ?: StorageSnapshot(0, 0, 0)
     LaunchedEffect(projects.size) { vm.refreshStorage() }
     val total = snapshot.projectsTotal + snapshot.runtimeSize + snapshot.exportsSize + snapshot.buildCacheSize
 

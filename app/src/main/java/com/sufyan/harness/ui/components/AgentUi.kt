@@ -41,6 +41,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.sufyan.harness.AgentPhase
 import com.sufyan.harness.ToolActivity
 import com.sufyan.harness.UiMessage
