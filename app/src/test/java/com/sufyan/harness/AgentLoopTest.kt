@@ -172,12 +172,14 @@ class AgentLoopTest {
     }
 
     @Test
-    fun `the step limit ends the turn with an explanation`() = runTest {
+    fun `the step limit ends the turn with a step-limit event, not an error`() = runTest {
         val provider = FakeProvider((1..20).map { listOf(writeCall("f$it.txt", "x"), StreamEvent.Done) })
         val events = Agent(provider, AgentTools(files, root, commandsEnabled = false), maxIterations = 3)
             .run("m", mutableListOf(ChatMessage("user", "loop")), 0.2f).toList()
-        val failed = events.filterIsInstance<AgentEvent.Failed>().single()
-        assertTrue(failed.error.detail.contains("step limit"))
+        // The turn stops, but it is reported as a pause the caller can resume, not a failure.
+        assertEquals(3, events.filterIsInstance<AgentEvent.StepLimit>().single().steps)
+        assertFalse(events.any { it is AgentEvent.Failed })
+        assertTrue(events.last() is AgentEvent.TurnFinished)
     }
 
     @Test

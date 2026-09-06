@@ -123,17 +123,15 @@ fun TerminalScreen(vm: HarnessViewModel, onOpenRuntime: () -> Unit = {}) {
                     "The terminal runs inside a project directory. Open a project first.",
                 )
             }
+        } else if (cloudMode) {
+            CloudTerminalPanel(
+                state = cloudCmd,
+                modifier = Modifier.weight(1f),
+                onStop = { vm.stopFollowingCloudCommand() },
+                onClear = { vm.clearCloudCommand() },
+            )
         } else {
             Column(Modifier.weight(1f).background(HarnessColors.Base)) {
-                if (cloudMode) {
-                    CloudTerminalPanel(
-                        state = cloudCmd,
-                        modifier = Modifier.weight(1f),
-                        onStop = { vm.stopFollowingCloudCommand() },
-                        onClear = { vm.clearCloudCommand() },
-                    )
-                    return@Column
-                }
                 // §26 — one tab per real process.
                 if (sessions.isNotEmpty()) {
                     Row(
