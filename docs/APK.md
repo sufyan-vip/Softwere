@@ -9,7 +9,7 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 | | |
 | --- | --- |
-| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34005358118> |
+| Run | <https://github.com/sufyan-vip/Softwere/actions/runs/34007811588> |
 | Commit | `HEAD` on `arena/01a07329-softwere` — crash fix, cloud build, cloud shell, agent step budget |
 | Release APK | `app-release.apk` — 12 MB (artifact `sufyan-harness-release-apk`, 11,987,234 bytes zipped) |
 | Debug APK | `app-debug.apk` — 18 MB (artifact `sufyan-harness-debug-apk`, 18,382,876 bytes zipped) |
@@ -27,8 +27,8 @@ project with a real Android SDK. Nothing here is a mock-up: the workflow runs `a
 
 A direct, login-free link for the same artifacts (the repository is public):
 
-- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34005358118/sufyan-harness-release-apk.zip>
-- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34005358118/sufyan-harness-debug-apk.zip>
+- Release: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34007811588/sufyan-harness-release-apk.zip>
+- Debug: <https://nightly.link/sufyan-vip/Softwere/actions/runs/34007811588/sufyan-harness-debug-apk.zip>
 
 ## What changed since the first APK
 
@@ -72,6 +72,21 @@ A turn no longer dies at "12 steps reached":
 - **Settings → Continue automatically** (on by default) resumes the turn by itself when the budget
   runs out, up to 5 times, and says so in the chat each time.
 - If it does stop, the message says *paused, not failed*, and the Continue button carries on.
+
+## Using a free AI provider instead of OpenRouter
+
+The app talks plain OpenAI-compatible HTTP, so any provider that speaks it works. **Settings → AI**
+has one-tap endpoint presets — OpenRouter, Groq, Gemini, Cerebras, Mistral, GitHub Models — and then
+you paste *that provider's* key and type one of *its* model ids. Two things were fixed to make this
+real rather than theoretical:
+
+- **Test connection** no longer depends on `/auth/key` (an OpenRouter-only route). If that route is
+  absent it proves the key the portable way, with an authenticated `GET /models`.
+- **The model list** now sends the API key, which every provider except OpenRouter requires, and
+  reports 401/404 distinctly instead of a generic failure.
+
+Nothing here is unlimited — free tiers are per-minute and per-day capped. Truly unlimited means a
+model running on your own hardware.
 
 ## Install on a phone
 
